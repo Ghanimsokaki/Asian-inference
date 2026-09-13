@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+db.json
+rate_limits.json
+__pycache__/
+*.pyc
+.env
+venv/

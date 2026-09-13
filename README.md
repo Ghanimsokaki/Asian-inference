@@ -13,7 +13,7 @@ Similar to HuggingFace — browse, share, train, deploy.
 | Model Fine-tuner | Pick a base model → auto-generates Google Colab training notebook |
 | Dataset Hub | Browse & download community datasets (CSV / JSON / JSONL) |
 | Model Hub | Browse community models, run live inference |
-| API Keys | Store HF tokens & external keys, generate your Gemby API key |
+| API Keys | Generate your Gemby API key and manage optional external keys |
 | Plans | Starter (free) / Pro $9.99 / Elite $29.99 via Traakteer |
 | Admin Panel | Full control: users, datasets, models, tickets, tokens |
 
@@ -39,6 +39,7 @@ Go to https://github.com/new → name it `gemby-platform` → Private → Create
 gemby-platform/
 ├── app.py
 ├── core.py
+├── hf_storage.py
 ├── ui.py
 ├── inference.py
 ├── requirements.txt
@@ -78,8 +79,16 @@ Register with **emir.erningpraja@gmail.com** to get:
 2. Platform auto-generates a `.ipynb` Colab notebook
 3. User downloads it, opens in https://colab.research.google.com
 4. Selects T4 GPU (free) → Run All
-5. Model trains with LoRA fine-tuning and pushes to their HuggingFace repo
-6. Model is now live and can be used for inference on Gemby Platform
+5. Model trains with LoRA fine-tuning and pushes to platform-managed Hugging Face storage
+6. The model is now live and can be used for inference on Gemby Platform
+
+## Storage architecture
+
+Users never need to create or manage a model repository. Dataset payloads and trained model
+artifacts are stored in private Hugging Face Hub repositories managed by the platform; the
+application database keeps only lightweight metadata and opaque object paths. Configure the
+server-side `HF_TOKEN` secret with a Hugging Face write token. Do not expose that token in the
+Streamlit UI or commit it to the repository.
 
 ---
 
