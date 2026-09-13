@@ -8,7 +8,7 @@ import streamlit as st
 from datetime import datetime
 
 import core, ui, inference
-from hf_storage import make_model_repo
+from hf_storage import make_model_repo, storage_diagnostic
 from core import (
     PLANS, ADMIN_EMAIL,
     load_db, save_db,
@@ -429,7 +429,7 @@ def page_my_models(user):
     3. Download the auto-generated <b>Colab notebook</b><br>
     4. Open in Google Colab → <b>T4 GPU (free)</b><br>
     5. Run all cells → model pushes to HuggingFace<br>
-    6. Paste HF repo here → model lives on Asian Inference
+    6. The platform connects the trained model automatically
   </div>
 </div>
 <div class="card" style="margin-top:.7rem">
@@ -477,7 +477,7 @@ def page_my_models(user):
                 if not base:     st.error("Base model required."); st.stop()
                 out_repo = make_model_repo(user["email"])
                 if not out_repo:
-                    st.error("Model storage is not available yet. Please contact support or try again later."); st.stop()
+                    st.error(storage_diagnostic()); st.stop()
 
                 chosen_rows = []
                 if ds_sel != "— none (zero-shot) —":

@@ -46,6 +46,16 @@ def storage_repo(token: str | None = None) -> str | None:
     return f"{username}/gemby-platform-data-{suffix}"
 
 
+def storage_diagnostic(token: str | None = None) -> str:
+    """Return an actionable, non-sensitive configuration message."""
+    active_token = token or HF_TOKEN
+    if not active_token:
+        return "The platform storage connection is not configured. An administrator must add HF_TOKEN to Streamlit Secrets."
+    if not whoami(active_token):
+        return "The platform storage connection was rejected. Check that HF_TOKEN is valid and has write access."
+    return "The platform storage connection is ready."
+
+
 def ensure_repo(repo_id: str, repo_type: str = "dataset", token: str | None = None) -> bool:
     payload = {"name": repo_id.split("/", 1)[-1], "private": True, "type": repo_type}
     try:
