@@ -1,323 +1,70 @@
-"""ui.py — CSS, sidebar, shared components for Asian Inference"""
+"""ui.py — animated visual system, sidebar, and shared components."""
 import streamlit as st
-from core import PLANS, ADMIN_EMAIL, APP_NAME
+from core import PLANS, ADMIN_EMAIL
 
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;1,14..32,400&family=JetBrains+Mono:wght@400;500&display=swap');
-
-:root {
-  --bg:       #06060f;
-  --s1:       #0c0c1e;
-  --s2:       #111128;
-  --s3:       #181838;
-  --b1:       #1c1c40;
-  --b2:       #252558;
-  --txt:      #e2e4f0;
-  --txt2:     #7880a4;
-  --txt3:     #3d4270;
-  --acc:      #5b6ef5;
-  --acc2:     #818cf8;
-  --acc3:     #c7d2fe;
-  --grn:      #34d399;
-  --red:      #f87171;
-  --amb:      #fbbf24;
-  --r:        12px;
-  --r2:       18px;
-}
-
-*, *::before, *::after { box-sizing: border-box; }
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; background: var(--bg) !important; color: var(--txt); }
-
-/* ── Sidebar ── */
-section[data-testid="stSidebar"] { background: #040410 !important; border-right: 1px solid var(--b1); }
-section[data-testid="stSidebar"] .stRadio label { color: var(--txt2) !important; font-size: .88rem; padding: .35rem .5rem; border-radius: 8px; transition: background .15s; }
-section[data-testid="stSidebar"] .stRadio label:hover { background: var(--s2) !important; color: var(--txt) !important; }
-
-/* ── Inputs ── */
-input, textarea, .stTextInput input, .stTextArea textarea {
-  background: var(--s2) !important;
-  border: 1px solid var(--b1) !important;
-  color: var(--txt) !important;
-  border-radius: var(--r) !important;
-  font-family: 'Inter', sans-serif !important;
-}
-input:focus, textarea:focus { border-color: var(--acc) !important; box-shadow: 0 0 0 3px #5b6ef520 !important; }
-.stSelectbox > div > div { background: var(--s2) !important; border: 1px solid var(--b1) !important; border-radius: var(--r) !important; }
-
-/* ── Forms ── */
-div[data-testid="stForm"] { background: var(--s1); border: 1px solid var(--b1); border-radius: var(--r2); padding: 1.6rem; }
-
-/* ── Buttons ── */
-.stButton > button {
-  background: var(--acc) !important;
-  color: #fff !important;
-  border: none !important;
-  border-radius: var(--r) !important;
-  font-weight: 500 !important;
-  font-size: .88rem !important;
-  padding: .5rem 1.2rem !important;
-  transition: all .15s !important;
-  letter-spacing: .01em;
-}
-.stButton > button:hover { background: #6b7ff7 !important; transform: translateY(-1px); box-shadow: 0 4px 20px #5b6ef540; }
-.stButton > button:active { transform: translateY(0); }
-.stButton > button[kind="secondary"] {
-  background: var(--s2) !important;
-  border: 1px solid var(--b2) !important;
-  color: var(--txt2) !important;
-}
-.stButton > button[kind="secondary"]:hover { background: var(--s3) !important; color: var(--txt) !important; }
-.stLinkButton > a {
-  background: var(--acc) !important;
-  color: #fff !important;
-  border-radius: var(--r) !important;
-  font-weight: 500 !important;
-  border: none !important;
-  text-decoration: none !important;
-  transition: all .15s !important;
-}
-.stLinkButton > a:hover { background: #6b7ff7 !important; transform: translateY(-1px); }
-
-/* ── Tabs ── */
-div[data-baseweb="tab-list"] { background: transparent !important; border-bottom: 1px solid var(--b1) !important; gap: .25rem; }
-button[data-baseweb="tab"] { background: transparent !important; border: none !important; color: var(--txt2) !important; font-size: .88rem !important; padding: .6rem 1rem !important; border-radius: var(--r) var(--r) 0 0 !important; }
-button[data-baseweb="tab"]:hover { background: var(--s2) !important; color: var(--txt) !important; }
-button[data-baseweb="tab"][aria-selected="true"] { background: var(--s2) !important; color: var(--acc2) !important; border-bottom: 2px solid var(--acc) !important; font-weight: 500 !important; }
-
-/* ── Expander ── */
-details { background: var(--s1) !important; border: 1px solid var(--b1) !important; border-radius: var(--r) !important; }
-summary { color: var(--txt2) !important; font-size: .88rem !important; }
-
-/* ── Metrics ── */
-div[data-testid="metric-container"] { background: var(--s1); border: 1px solid var(--b1); border-radius: var(--r); padding: .9rem 1.1rem; }
-div[data-testid="metric-container"] label { color: var(--txt3) !important; font-size: .75rem !important; }
-div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: var(--txt) !important; font-weight: 600; }
-
-/* ── Progress ── */
-div[data-testid="stProgressBar"] > div { background: var(--b1) !important; border-radius: 999px !important; }
-div[data-testid="stProgressBar"] > div > div { background: linear-gradient(90deg, var(--acc), var(--acc2)) !important; border-radius: 999px !important; }
-
-/* ── Slider ── */
-div[data-testid="stSlider"] div[role="slider"] { background: var(--acc) !important; }
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 999px; }
-
-/* ── Custom components ── */
-.hero {
-  background: linear-gradient(135deg, #0a0a22 0%, #0d0d2e 50%, #080820 100%);
-  border: 1px solid var(--b2);
-  border-radius: var(--r2);
-  padding: 2.6rem 3rem 2.2rem;
-  margin-bottom: 1.8rem;
-  text-align: center;
-  position: relative;
-  overflow: hidden;
-}
-.hero::before {
-  content: '';
-  position: absolute; inset: 0;
-  background: radial-gradient(ellipse at 50% 0%, #5b6ef512 0%, transparent 70%);
-  pointer-events: none;
-}
-.hero h1 {
-  font-size: 2.2rem; font-weight: 600; letter-spacing: -.04em;
-  background: linear-gradient(120deg, #a5b4fc 0%, #818cf8 40%, #e0e7ff 100%);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  margin: 0 0 .5rem; line-height: 1.2;
-}
-.hero p { color: var(--txt2); font-size: .92rem; margin: 0; line-height: 1.6; }
-.hero .badge { display: inline-block; background: #1a1a40; border: 1px solid var(--b2);
-  border-radius: 999px; padding: .2rem .9rem; font-size: .75rem; color: var(--acc2);
-  margin-bottom: .8rem; letter-spacing: .05em; text-transform: uppercase; }
-
-.card {
-  background: var(--s1); border: 1px solid var(--b1);
-  border-radius: var(--r2); padding: 1.3rem 1.5rem;
-  margin-bottom: .7rem; transition: border-color .18s, box-shadow .18s;
-}
-.card:hover { border-color: var(--b2); }
-.card.glow { border-color: var(--acc); box-shadow: 0 0 0 1px #5b6ef520, 0 4px 30px #5b6ef512; }
-
-.plan-card {
-  background: var(--s1); border: 1px solid var(--b1);
-  border-radius: var(--r2); padding: 1.6rem 1.4rem;
-  height: 100%; transition: all .2s; position: relative; overflow: hidden;
-}
-.plan-card:hover { border-color: var(--b2); transform: translateY(-2px); box-shadow: 0 8px 40px #00000040; }
-.plan-card.current { border-color: var(--acc); box-shadow: 0 0 0 1px #5b6ef530; }
-.plan-card.popular::before {
-  content: 'MOST POPULAR';
-  position: absolute; top: 0; right: 0;
-  background: var(--acc); color: #fff;
-  font-size: .65rem; font-weight: 600; letter-spacing: .08em;
-  padding: .25rem .7rem; border-radius: 0 var(--r2) 0 var(--r);
-}
-
-.hub-card {
-  background: var(--s1); border: 1px solid var(--b1);
-  border-radius: var(--r2); padding: 1.2rem 1.4rem;
-  margin-bottom: .6rem; transition: border-color .18s;
-}
-.hub-card:hover { border-color: var(--b2); }
-.hub-card h4 { margin: 0 0 .3rem; font-size: .97rem; font-weight: 600; color: var(--txt); }
-.hub-card .desc { font-size: .83rem; color: var(--txt2); margin-bottom: .4rem; line-height: 1.5; }
-.hub-card .meta { font-size: .75rem; color: var(--txt3); }
-
-/* Chat bubble styles */
-.chat-wrap { display: flex; flex-direction: column; gap: .8rem; margin: 1rem 0; }
-.bubble { max-width: 80%; padding: .75rem 1rem; border-radius: var(--r2); font-size: .88rem; line-height: 1.6; }
-.bubble.user { background: var(--acc); color: #fff; align-self: flex-end; border-radius: var(--r2) var(--r2) 4px var(--r2); }
-.bubble.bot  { background: var(--s2); color: var(--txt); align-self: flex-start; border-radius: var(--r2) var(--r2) var(--r2) 4px; border: 1px solid var(--b1); }
-.bubble .sender { font-size: .7rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; margin-bottom: .3rem; opacity: .7; }
-
-.tag { display: inline-block; background: var(--s3); border: 1px solid var(--b2);
-  border-radius: 999px; padding: .15rem .65rem; font-size: .72rem; color: var(--txt2); margin: .1rem; }
-.tag.acc { background: #1a1a44; border-color: #3030a0; color: var(--acc2); }
-
-.pill { display: inline-block; background: var(--s2); border: 1px solid var(--b1);
-  border-radius: 999px; padding: .2rem .85rem; font-size: .78rem;
-  color: var(--txt2); font-family: 'JetBrains Mono', monospace; }
-
-.key-box { background: var(--s2); border: 1px solid var(--b2); border-radius: var(--r);
-  padding: .7rem 1rem; font-family: 'JetBrains Mono', monospace; font-size: .82rem;
-  color: var(--acc2); word-break: break-all; letter-spacing: .02em; }
-
-.stat-num { font-size: 2rem; font-weight: 600; color: var(--txt); line-height: 1; }
-.stat-lbl { font-size: .73rem; color: var(--txt3); margin-top: .25rem; text-transform: uppercase; letter-spacing: .05em; }
-
-.note  { background: #0a1030; border: 1px solid #1a2060; border-radius: var(--r);
-  padding: .65rem 1rem; color: #7dd3fc; font-size: .82rem; margin: .5rem 0; }
-.warn  { background: #180808; border: 1px solid #4a1010; border-radius: var(--r);
-  padding: .65rem 1rem; color: #fca5a5; font-size: .82rem; margin: .5rem 0; }
-.ok    { background: #081808; border: 1px solid #104a10; border-radius: var(--r);
-  padding: .65rem 1rem; color: #6ee7b7; font-size: .82rem; margin: .5rem 0; }
-
-.admin-bar { background: linear-gradient(90deg,#3030a020,transparent 80%);
-  border-left: 3px solid var(--acc); border-radius: 0 var(--r) var(--r) 0;
-  padding: .5rem 1rem; color: var(--acc2); font-size: .8rem; margin-bottom: 1rem; }
-
-.divider { border: none; border-top: 1px solid var(--b1); margin: 1.5rem 0; }
-
-/* ── Streamlit overrides ── */
-div[data-testid="stVerticalBlock"] { gap: .5rem; }
-.stAlert { border-radius: var(--r) !important; font-size: .85rem !important; }
-footer { display: none !important; }
-#MainMenu { display: none !important; }
-header { display: none !important; }
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+:root{--bg:#09090b;--panel:#151518;--panel2:#1b1b20;--line:#2b2b31;--line2:#404047;--text:#f4f4f5;--muted:#a1a1aa;--subtle:#71717a;--brand:#ff9d3d;--brand2:#ffb45e;--violet:#9b8cff;--cyan:#6bdcff;--green:#69d89b;--radius:16px;--small:11px;--ease:cubic-bezier(.22,.8,.24,1)}
+*,*:before,*:after{box-sizing:border-box}html,body,[class*=css]{font-family:Inter,sans-serif;background:var(--bg)!important;color:var(--text)}body{overflow-x:hidden}.stApp{background:radial-gradient(circle at 76% -10%,#9b8cff1c,transparent 32rem),radial-gradient(circle at 12% 100%,#ff9d3d0d,transparent 28rem),var(--bg)!important}.stApp:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.15;background-image:linear-gradient(#fff1 1px,transparent 1px),linear-gradient(90deg,#fff1 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(#000,transparent 75%)}#MainMenu,header,footer{display:none!important}
+h1,h2,h3,h4,.hero h1{font-family:'Space Grotesk',sans-serif!important;letter-spacing:-.035em}h1,h2,h3{color:var(--text)!important}p,label,.stCaption{color:var(--muted)}code,.key-box{font-family:'DM Mono',monospace!important}
+section[data-testid=stSidebar]{background:#0c0c0ef2!important;border-right:1px solid var(--line)!important;backdrop-filter:blur(18px)}section[data-testid=stSidebar]>div{padding-top:1.1rem}section[data-testid=stSidebar] .stRadio label{color:var(--muted)!important;font-size:.83rem;padding:.48rem .62rem;border-radius:var(--small);transition:all .18s var(--ease)}section[data-testid=stSidebar] .stRadio label:hover{background:var(--panel)!important;color:var(--text)!important;transform:translateX(3px)}section[data-testid=stSidebar] .stRadio label:has(input:checked){background:linear-gradient(90deg,#ff9d3d29,#ff9d3d0a)!important;color:var(--brand2)!important;box-shadow:inset 2px 0 var(--brand)}
+input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div,[data-baseweb=input]>div{background:#151518e8!important;border:1px solid var(--line)!important;color:var(--text)!important;border-radius:var(--small)!important;font-family:Inter,sans-serif!important;transition:border-color .18s,box-shadow .18s}input:hover,textarea:hover,[data-baseweb=select]>div{border-color:var(--line2)!important}input:focus,textarea:focus{border-color:var(--brand)!important;box-shadow:0 0 0 3px #ff9d3d1f,0 0 24px #ff9d3d0f!important}div[data-testid=stForm]{background:linear-gradient(145deg,#19191de8,#0f0f12e0);border:1px solid var(--line);border-radius:var(--radius);padding:1.35rem;box-shadow:0 18px 60px #0000002e}
+.stButton>button,.stLinkButton>a,button[kind=primary]{position:relative;overflow:hidden;background:var(--brand)!important;color:#1a1208!important;border:1px solid #fff2!important;border-radius:var(--small)!important;font-weight:700!important;font-size:.82rem!important;min-height:2.35rem;transition:transform .18s var(--ease),box-shadow .18s var(--ease),filter .18s var(--ease)!important}.stButton>button:hover,.stLinkButton>a:hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 9px 28px #ff9d3d33}.stButton>button:active,.stLinkButton>a:active{transform:scale(.98)}.stButton>button[kind=secondary]{background:var(--panel)!important;color:var(--muted)!important;border:1px solid var(--line)!important}.stButton>button[kind=secondary]:hover{background:var(--panel2)!important;color:var(--text)!important}
+div[data-baseweb=tab-list]{gap:.3rem;border-bottom:1px solid var(--line)!important}button[data-baseweb=tab]{color:var(--subtle)!important;border-radius:9px 9px 0 0!important;transition:all .18s}button[data-baseweb=tab]:hover{color:var(--text)!important;background:var(--panel)!important}button[data-baseweb=tab][aria-selected=true]{color:var(--brand2)!important;border-bottom:2px solid var(--brand)!important;background:#ff9d3d0f!important}details{background:#151518b8!important;border:1px solid var(--line)!important;border-radius:var(--small)!important;transition:all .2s}details:hover{border-color:var(--line2)!important}summary{color:var(--muted)!important;font-size:.86rem!important}.stAlert{border-radius:var(--small)!important;font-size:.84rem!important;border:1px solid var(--line)!important}
+.hero{position:relative;overflow:hidden;min-height:184px;display:flex;flex-direction:column;justify-content:flex-end;background:linear-gradient(125deg,#ff9d3d21,#9b8cff1f 47%,#0f0f12b3 80%);border:1px solid var(--line);border-radius:22px;padding:2.25rem 2.4rem 2rem;margin-bottom:1.55rem;box-shadow:0 24px 80px #0000003d;animation:rise .55s var(--ease) both}.hero:before{content:"";position:absolute;width:19rem;height:19rem;right:-4rem;top:-8rem;border-radius:50%;background:#9b8cff2e;filter:blur(4px);animation:float 8s ease-in-out infinite}.hero:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(110deg,transparent 20%,#fff0e 45%,transparent 68%);transform:translateX(-120%);animation:shine 5s 1.2s var(--ease) infinite}.hero>*{position:relative;z-index:1}.hero h1{font-size:clamp(2rem,4vw,3.1rem);line-height:1.02;margin:0 0 .65rem;color:var(--text)!important}.hero p{max-width:650px;color:#c4c4ca;font-size:.92rem;line-height:1.65;margin:0}.hero .badge{display:inline-flex;align-items:center;gap:.45rem;width:fit-content;background:#ff9d3d1a;border:1px solid #ff9d3d47;border-radius:999px;padding:.32rem .7rem;font-size:.68rem;color:var(--brand2);margin-bottom:.85rem;letter-spacing:.08em;text-transform:uppercase}.hero .badge:before{content:"";width:6px;height:6px;background:var(--green);border-radius:50%;box-shadow:0 0 12px var(--green);animation:pulse 2s ease-in-out infinite}
+.card,.hub-card,.plan-card{background:linear-gradient(145deg,#19191deb,#101013e6);border:1px solid var(--line);border-radius:var(--radius);padding:1.2rem 1.35rem;margin-bottom:.75rem;position:relative;overflow:hidden;transition:all .22s var(--ease)}.card:before,.hub-card:before,.plan-card:before{content:"";position:absolute;left:0;top:0;height:1px;width:32%;background:linear-gradient(90deg,var(--brand),transparent);opacity:.75}.card:hover,.hub-card:hover,.plan-card:hover{border-color:var(--line2);transform:translateY(-3px);box-shadow:0 15px 42px #0003}.card.glow{border-color:#ff9d3d85;box-shadow:0 0 0 1px #ff9d3d14,0 16px 50px #ff9d3d14}.plan-card{min-height:255px}.plan-card.popular{border-color:#9b8cff9e;box-shadow:0 0 45px #9b8cff14}.plan-card.popular:after{content:'POPULAR';position:absolute;right:14px;top:13px;color:var(--violet);font-size:.62rem;font-weight:700;letter-spacing:.12em}.plan-card.current{border-color:#ff9d3d80}.hub-card h4{margin:0 0 .38rem;font-size:.98rem;color:var(--text)}.hub-card .desc{font-size:.84rem;color:var(--muted);margin-bottom:.5rem;line-height:1.55}.hub-card .meta{font-size:.73rem;color:var(--subtle)}
+.chat-wrap{display:flex;flex-direction:column;gap:.72rem;margin:.9rem 0}.bubble{max-width:82%;padding:.85rem 1rem;border-radius:15px;font-size:.88rem;line-height:1.65;animation:rise .35s var(--ease) both}.bubble.user{background:linear-gradient(135deg,#ff9d3d,#f47f35);color:#231207;align-self:flex-end;border-radius:16px 16px 4px 16px;box-shadow:0 8px 24px #ff9d3d21}.bubble.bot{background:var(--panel);color:var(--text);align-self:flex-start;border:1px solid var(--line);border-radius:16px 16px 16px 4px}.bubble .sender{font-size:.67rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:.35rem;opacity:.62}.tag{display:inline-block;background:#1b1b20;border:1px solid var(--line);border-radius:999px;padding:.2rem .66rem;font-size:.71rem;color:var(--muted);margin:.12rem;transition:all .18s}.tag:hover{border-color:var(--brand);color:var(--brand2);transform:translateY(-1px)}.tag.acc{background:#9b8cff1a;border-color:#9b8cff47;color:#b9b0ff}.pill{display:inline-block;background:#ff9d3d17;border:1px solid #ff9d3d38;border-radius:999px;padding:.25rem .75rem;font-size:.74rem;color:var(--brand2);font-family:'DM Mono',monospace}.key-box{background:#101013;border:1px dashed #ff9d3d73;border-radius:var(--small);padding:.78rem 1rem;font-size:.8rem;color:var(--brand2);word-break:break-all}.stat-num{font-family:'Space Grotesk',sans-serif;font-size:2.25rem;font-weight:700;color:var(--text);line-height:1}.stat-lbl{font-size:.7rem;color:var(--subtle);margin-top:.35rem;letter-spacing:.05em}.note{background:#6bdcff12;border:1px solid #6bdcff33;border-radius:var(--small);padding:.72rem 1rem;color:#9eeaff;font-size:.82rem;margin:.55rem 0}.warn{background:#ff747414;border:1px solid #ff747447;border-radius:var(--small);padding:.72rem 1rem;color:#ffadad;font-size:.82rem;margin:.55rem 0}.ok{background:#69d89b14;border:1px solid #69d89b40;border-radius:var(--small);padding:.72rem 1rem;color:#9af0bd;font-size:.82rem;margin:.55rem 0}.admin-bar{background:linear-gradient(90deg,#9b8cff24,transparent 78%);border-left:3px solid var(--violet);border-radius:0 var(--small) var(--small) 0;padding:.62rem 1rem;color:#bcb4ff;font-size:.8rem;margin-bottom:1rem}.divider{border:none;border-top:1px solid var(--line);margin:1.45rem 0}div[data-testid=stVerticalBlock]{gap:.55rem}div[data-testid=metric-container]{background:var(--panel);border:1px solid var(--line);border-radius:var(--small);padding:1rem}div[data-testid=metric-container] label{color:var(--subtle)!important;font-size:.73rem!important}div[data-testid=stProgressBar]>div{background:#27272a!important;border-radius:999px!important}div[data-testid=stProgressBar]>div>div{background:linear-gradient(90deg,var(--brand),var(--violet))!important;border-radius:999px!important}::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:#36363e;border-radius:99px}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}@keyframes float{0%,100%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(-16px,14px,0) scale(1.06)}}@keyframes pulse{0%,100%{opacity:.55;transform:scale(.82)}50%{opacity:1;transform:scale(1.16)}}@keyframes shine{0%,45%{transform:translateX(-120%)}70%,100%{transform:translateX(120%)}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}@media(max-width:760px){.hero{min-height:150px;padding:1.5rem}.hero h1{font-size:2rem}.bubble{max-width:94%}.card,.hub-card,.plan-card{padding:1rem}}
 </style>
 """
+
 
 def inject_css():
     st.markdown(CSS, unsafe_allow_html=True)
 
+
 def hero(title: str, sub: str = "", badge: str = ""):
     badge_html = f'<div class="badge">{badge}</div>' if badge else ""
-    st.markdown(f"""
-<div class="hero">
-  {badge_html}
-  <h1>{title}</h1>
-  {'<p>' + sub + '</p>' if sub else ''}
-</div>""", unsafe_allow_html=True)
+    st.markdown(f'<div class="hero">{badge_html}<h1>{title}</h1>{"<p>" + sub + "</p>" if sub else ""}</div>', unsafe_allow_html=True)
+
 
 def card(content_html: str, glow: bool = False):
-    cls = "card glow" if glow else "card"
-    st.markdown(f'<div class="{cls}">{content_html}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="{"card glow" if glow else "card"}">{content_html}</div>', unsafe_allow_html=True)
+
 
 def tag(text: str, accent: bool = False) -> str:
-    cls = "tag acc" if accent else "tag"
-    return f'<span class="{cls}">{text}</span>'
+    return f'<span class="{"tag acc" if accent else "tag"}">{text}</span>'
+
 
 def tags_html(tags: list, accent: bool = False) -> str:
     return "".join(tag(t, accent) for t in (tags or []))
 
+
 def sidebar_nav(user: dict) -> str:
     plan = PLANS[user["plan"]]
     with st.sidebar:
-        # Logo
-        st.markdown(f"""
-<div style="padding:1rem 0 .5rem;text-align:center">
-  <div style="font-size:1.3rem;font-weight:700;letter-spacing:-.02em;
-    background:linear-gradient(120deg,#a5b4fc,#818cf8);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent">
-    ⚡ Asian Inference
-  </div>
-  <div style="font-size:.7rem;color:var(--txt3);margin-top:.1rem;letter-spacing:.08em">AI PLATFORM</div>
-</div>""", unsafe_allow_html=True)
-
-        st.markdown('<hr class="divider" style="margin:.5rem 0 1rem">', unsafe_allow_html=True)
-
-        # User info
-        st.markdown(f"""
-<div style="background:var(--s2);border:1px solid var(--b1);border-radius:var(--r);
-  padding:.85rem 1rem;margin-bottom:1rem">
-  <div style="font-size:.7rem;color:var(--txt3);letter-spacing:.06em;text-transform:uppercase">Account</div>
-  <div style="font-weight:600;color:var(--txt);margin:.2rem 0 .05rem;font-size:.92rem">
-    {user.get('name') or 'User'}
-  </div>
-  <div style="font-size:.72rem;color:var(--txt3);margin-bottom:.5rem">{user['email']}</div>
-  <span class="pill">🪙 {user['tokens']:,}</span>
-  <span style="color:var(--txt3);font-size:.72rem;margin-left:.4rem">{plan['badge']} {plan['name']}</span>
-</div>""", unsafe_allow_html=True)
-
-        pages = [
-            "🏠  Home",
-            "💬  Dataset Chat",
-            "🤖  My Models",
-            "📦  Dataset Hub",
-            "🌐  Model Hub",
-            "🔑  API Keys",
-            "⚡  Upgrade",
-            "💬  Support",
-        ]
+        st.markdown(f'''<div style="padding:.55rem 0 1rem;text-align:left"><div style="display:flex;align-items:center;gap:.55rem;font-family:'Space Grotesk';font-size:1.2rem;font-weight:700;letter-spacing:-.04em;color:var(--text)"><span style="display:grid;place-items:center;width:31px;height:31px;border-radius:10px;background:linear-gradient(135deg,var(--brand),#ff7043);color:#231207;box-shadow:0 5px 20px #ff9d3d40">✦</span>Asian Inference</div><div style="font-size:.67rem;color:var(--subtle);margin:.42rem 0 0 2.45rem;letter-spacing:.08em">MODEL WORKSPACE</div></div>''', unsafe_allow_html=True)
+        st.markdown(f'''<div style="background:linear-gradient(145deg,#ff9d3d17,#15151880);border:1px solid var(--line);border-radius:var(--small);padding:.85rem .9rem;margin-bottom:1rem"><div style="font-size:.67rem;color:var(--subtle);letter-spacing:.08em;text-transform:uppercase">Workspace</div><div style="font-family:'Space Grotesk';font-weight:600;color:var(--text);margin:.28rem 0 .12rem;font-size:.94rem">{user.get('name') or 'User'}</div><div style="font-size:.71rem;color:var(--subtle);margin-bottom:.6rem;overflow:hidden;text-overflow:ellipsis">{user['email']}</div><span class="pill">{plan['badge']} {plan['name']}</span><span style="color:var(--subtle);font-size:.71rem;margin-left:.35rem">{user['tokens']:,} tokens</span></div>''', unsafe_allow_html=True)
+        pages = ["🏠  Home", "💬  Dataset Chat", "🤖  My Models", "📦  Dataset Hub", "🌐  Model Hub", "🔑  API Keys", "⚡  Upgrade", "💬  Support"]
         if user["email"] == ADMIN_EMAIL:
             pages.append("👑  Admin")
-
         choice = st.radio("Navigation", pages, label_visibility="collapsed")
-
-        st.markdown('<hr class="divider">', unsafe_allow_html=True)
+        st.markdown('<hr class="divider" style="margin:.65rem 0">', unsafe_allow_html=True)
         if st.button("Sign out", use_container_width=True, type="secondary"):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
-
-        st.markdown("""
-<div style="font-size:.68rem;color:var(--txt3);text-align:center;margin-top:.5rem;line-height:1.6">
-  ⚡ Asian Inference Platform<br>Powered by HuggingFace
-</div>""", unsafe_allow_html=True)
-
+        st.markdown('<div style="font-size:.67rem;color:var(--subtle);text-align:left;margin-top:.7rem;padding-left:.25rem">Private by default · built for builders</div>', unsafe_allow_html=True)
     return choice
+
 
 def plan_cards_auth():
     cols = st.columns(3)
     for i, (pid, p) in enumerate(PLANS.items()):
         with cols[i]:
             price = "Free" if p["price"] == 0 else f"${p['price']}/mo"
-            feats = [
-                f"{p['monthly_tokens']:,} tokens/month",
-                f"Up to {p['max_rows']:,} rows/dataset",
-                f"{p['max_datasets']} datasets · {p['max_models']} models",
-                "Public sharing" if p["share"] else "Private only",
-                f"{p['api_keys']} API key{'s' if p['api_keys'] != 1 else ''}",
-            ]
-            popular = ' popular' if i == 1 else ''
-            cur = ' current' if i == 0 else ''
-            feats_html = "".join(
-                f'<div style="display:flex;align-items:center;gap:.4rem;'
-                f'margin:.3rem 0;font-size:.82rem;color:var(--txt2)">'
-                f'<span style="color:var(--grn)">✓</span>{f}</div>'
-                for f in feats
-            )
-            st.markdown(f"""
-<div class="plan-card{popular}{cur}">
-  <div style="font-size:1.5rem;margin-bottom:.4rem">{p['badge']}</div>
-  <div style="font-size:1rem;font-weight:600;color:var(--txt);margin-bottom:.3rem">{p['name']}</div>
-  <div style="font-size:1.8rem;font-weight:700;color:var(--txt);line-height:1">{price}</div>
-  <div style="font-size:.74rem;color:var(--txt3);margin-bottom:1rem">
-    {'via Traakteer · cancel anytime' if p['price'] > 0 else 'forever free'}
-  </div>
-  {feats_html}
-</div>""", unsafe_allow_html=True)
+            feats = [f"{p['monthly_tokens']:,} tokens/month", f"Up to {p['max_rows']:,} rows/dataset", f"{p['max_datasets']} datasets · {p['max_models']} models", "Public sharing" if p["share"] else "Private only", f"{p['api_keys']} API key{'s' if p['api_keys'] != 1 else ''}"]
+            classes = (' popular' if i == 1 else '') + (' current' if i == 0 else '')
+            feats_html = ''.join(f'<div style="display:flex;align-items:center;gap:.5rem;margin:.45rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>' for feature in feats)
+            st.markdown(f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.55rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700;color:var(--text);margin-bottom:.32rem">{p['name']}</div><div style="font-family:'Space Grotesk';font-size:2rem;font-weight:700;color:var(--text);line-height:1">{price}</div><div style="font-size:.72rem;color:var(--subtle);margin:.45rem 0 1.1rem">{'via Traakteer · cancel anytime' if p['price'] > 0 else 'forever free'}</div>{feats_html}</div>''', unsafe_allow_html=True)
