@@ -1,4 +1,4 @@
-"""ui.py — animated visual system, sidebar, and shared components."""
+"""ui.py — animated visual system, sidebar, shared components, and optional background audio helper."""
 import streamlit as st
 from core import PLANS, ADMIN_EMAIL
 
@@ -30,8 +30,11 @@ section[data-testid=stSidebar]{background:linear-gradient(180deg, #08080a, #0c0c
 input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div{background:var(--panel2)!important;border:1px solid var(--line)!important;color:var(--text)!important;border-radius:10px}
 
 /* Buttons */
-.stButton>button{background:linear-gradient(90deg,var(--brand),var(--brand2))!important;color:#1a1208!important;border-radius:10px;border:none;padding:.6rem .9rem;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.45)}
+.stButton>button{background:linear-gradient(90deg,var(--brand),var(--brand2))!important;color:#1a1208!important;border-radius:10px;border:none;padding:.6rem .9rem;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.45);transition:transform .18s cubic-bezier(.2,.9,.2,1),box-shadow .18s}
 .stButton>button[kind=secondary]{background:transparent!important;border:1px solid var(--line);color:var(--subtle)!important}
+/* Hover: float + aura */
+.stButton>button:hover{transform:translateY(-6px) scale(1.02);box-shadow:0 18px 40px rgba(107,61,252,0.14),0 6px 18px rgba(0,0,0,.5)}
+.stButton>button:focus{outline:none;box-shadow:0 12px 30px rgba(107,61,252,0.12)}
 
 /* Hero */
 .hero{position:relative;overflow:hidden;min-height:160px;display:flex;flex-direction:column;justify-content:flex-end;padding:1.6rem;border-radius:16px;background:linear-gradient(135deg,#0f0f12 0%, #121216 60%);border:1px solid rgba(255,255,255,0.02)}
@@ -45,7 +48,7 @@ input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div
 /* Hub card */
 .hub-card h4{margin:0;font-size:1rem}
 .hub-card .meta{color:var(--subtle);font-size:.82rem}
-.hub-card .desc{color:var(--muted);font-size:.9rem;margin-top:.35rem}
+.hub-card .desc{color:var(--muted);font-size:0.9rem;margin-top:.35rem}
 
 /* Chat bubbles */
 .chat-wrap{display:flex;flex-direction:column;gap:.6rem;margin:.6rem 0}
@@ -57,6 +60,12 @@ input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div
 
 /* small text */
 .small{font-size:.78rem;color:var(--subtle)}
+
+/* floating audio control */
+.bg-audio-ctl{position:fixed;right:18px;bottom:18px;z-index:9999;display:flex;gap:.5rem;align-items:center}
+.bg-audio-ctl button{background:transparent;border-radius:999px;border:1px solid rgba(255,255,255,0.06);padding:.55rem .6rem;color:var(--text);backdrop-filter:blur(4px);box-shadow:0 8px 20px rgba(0,0,0,.45)}
+.bg-audio-ctl button:hover{transform:translateY(-6px);box-shadow:0 18px 40px rgba(107,61,252,0.12)}
+.bg-audio-ctl .label{font-size:.78rem;color:var(--muted);padding:.35rem .6rem;border-radius:999px;background:linear-gradient(90deg,#ffffff05,#ffffff02)}
 </style>
 """
 
@@ -117,3 +126,32 @@ def plan_cards_auth():
             if st.button(btn_label, key=f"auth_plan_{pid}", use_container_width=True):
                 st.session_state["selected_plan"] = pid
                 st.rerun()
+
+
+# Background audio helper
+# Provide a calm music URL in Streamlit secrets as MUSIC_URL or pass url param.
+# Usage: ui.inject_audio() or ui.inject_audio('https://example.com/mycalm.mp3')
+
+def inject_audio(url: str | None = None, autoplay: bool = False):
+    music = url or st.secrets.get("MUSIC_URL") if hasattr(st, 'secrets') else url
+    if not music:
+        # nothing to do
+        return
+    # Render a floating player with a simple play/pause button. Autoplay is only attempted after user gesture.
+    html = f"""
+<div class="bg-audio-ctl">
+  <audio id="gemby-bg-audio" src="{music}" loop></audio>
+  <button id="gemby-audio-toggle" title="Play / pause">⏯️</button>
+  <div class="label">Calm music</div>
+</div>
+<script>
+const audio = document.getElementById('gemby-bg-audio');
+const btn = document.getElementById('gemby-audio-toggle');
+btn.addEventListener('click', ()=>{
+  try{
+    if(audio.paused){ audio.play(); btn.innerText='⏸️'; }
+    else { audio.pause(); btn.innerText='⏯️'; }
+  }catch(e){ console.log('Audio play failed', e); alert('Unable to play audio — check browser autoplay policies or provide a user gesture.'); }
+});
+// If autoplay requested, try to play (may be blocked until user gesture).
+if(
