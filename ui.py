@@ -2,20 +2,61 @@
 import streamlit as st
 from core import PLANS, ADMIN_EMAIL
 
+# Polished CSS with subtle animations and readable variables.
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
-:root{--bg:#09090b;--panel:#151518;--panel2:#1b1b20;--line:#2b2b31;--line2:#404047;--text:#f4f4f5;--muted:#a1a1aa;--subtle:#71717a;--brand:#ff9d3d;--brand2:#ffb45e;--violet:#9b8cff;--cyan:#6bdcff;--green:#69d89b;--radius:16px;--small:11px;--ease:cubic-bezier(.22,.8,.24,1)}
-*,*:before,*:after{box-sizing:border-box}html,body,[class*=css]{font-family:Inter,sans-serif;background:var(--bg)!important;color:var(--text)}body{overflow-x:hidden}.stApp{background:radial-gradient(circle at 76% -10%,#9b8cff1c,transparent 32rem),radial-gradient(circle at 12% 100%,#ff9d3d0d,transparent 28rem),var(--bg)!important}.stApp:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.15;background-image:linear-gradient(#fff1 1px,transparent 1px),linear-gradient(90deg,#fff1 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(#000,transparent 75%)}#MainMenu,header,footer{display:none!important}
-h1,h2,h3,h4,.hero h1{font-family:'Space Grotesk',sans-serif!important;letter-spacing:-.035em}h1,h2,h3{color:var(--text)!important}p,label,.stCaption{color:var(--muted)}code,.key-box{font-family:'DM Mono',monospace!important}
-section[data-testid=stSidebar]{background:#0c0c0ef2!important;border-right:1px solid var(--line)!important;backdrop-filter:blur(18px)}section[data-testid=stSidebar]>div{padding-top:1.1rem}section[data-testid=stSidebar] .stRadio label{color:var(--muted)!important;font-size:.83rem;padding:.48rem .62rem;border-radius:var(--small);transition:all .18s var(--ease)}section[data-testid=stSidebar] .stRadio label:hover{background:var(--panel)!important;color:var(--text)!important;transform:translateX(3px)}section[data-testid=stSidebar] .stRadio label:has(input:checked){background:linear-gradient(90deg,#ff9d3d29,#ff9d3d0a)!important;color:var(--brand2)!important;box-shadow:inset 2px 0 var(--brand)}
-input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div,[data-baseweb=input]>div{background:#151518e8!important;border:1px solid var(--line)!important;color:var(--text)!important;border-radius:var(--small)!important;font-family:Inter,sans-serif!important;transition:border-color .18s,box-shadow .18s}input:hover,textarea:hover,[data-baseweb=select]>div{border-color:var(--line2)!important}input:focus,textarea:focus{border-color:var(--brand)!important;box-shadow:0 0 0 3px #ff9d3d1f,0 0 24px #ff9d3d0f!important}div[data-testid=stForm]{background:linear-gradient(145deg,#19191de8,#0f0f12e0);border:1px solid var(--line);border-radius:var(--radius);padding:1.35rem;box-shadow:0 18px 60px #0000002e}
-.stButton>button,.stLinkButton>a,button[kind=primary]{position:relative;overflow:hidden;background:var(--brand)!important;color:#1a1208!important;border:1px solid #fff2!important;border-radius:var(--small)!important;font-weight:700!important;font-size:.82rem!important;min-height:2.35rem;transition:transform .18s var(--ease),box-shadow .18s var(--ease),filter .18s var(--ease)!important}.stButton>button:hover,.stLinkButton>a:hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 9px 28px #ff9d3d33}.stButton>button:active,.stLinkButton>a:active{transform:scale(.98)}.stButton>button[kind=secondary]{background:var(--panel)!important;color:var(--muted)!important;border:1px solid var(--line)!important}.stButton>button[kind=secondary]:hover{background:var(--panel2)!important;color:var(--text)!important}
-div[data-baseweb=tab-list]{gap:.3rem;border-bottom:1px solid var(--line)!important}button[data-baseweb=tab]{color:var(--subtle)!important;border-radius:9px 9px 0 0!important;transition:all .18s}button[data-baseweb=tab]:hover{color:var(--text)!important;background:var(--panel)!important}button[data-baseweb=tab][aria-selected=true]{color:var(--brand2)!important;border-bottom:2px solid var(--brand)!important;background:#ff9d3d0f!important}details{background:#151518b8!important;border:1px solid var(--line)!important;border-radius:var(--small)!important;transition:all .2s}details:hover{border-color:var(--line2)!important}summary{color:var(--muted)!important;font-size:.86rem!important}.stAlert{border-radius:var(--small)!important;font-size:.84rem!important;border:1px solid var(--line)!important}
-.hero{position:relative;overflow:hidden;min-height:184px;display:flex;flex-direction:column;justify-content:flex-end;background:linear-gradient(125deg,#ff9d3d21,#9b8cff1f 47%,#0f0f12b3 80%);border:1px solid var(--line);border-radius:22px;padding:2.25rem 2.4rem 2rem;margin-bottom:1.55rem;box-shadow:0 24px 80px #0000003d;animation:rise .55s var(--ease) both}.hero:before{content:"";position:absolute;width:19rem;height:19rem;right:-4rem;top:-8rem;border-radius:50%;background:#9b8cff2e;filter:blur(4px);animation:float 8s ease-in-out infinite}.hero:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(110deg,transparent 20%,#fff0e 45%,transparent 68%);transform:translateX(-120%);animation:shine 5s 1.2s var(--ease) infinite}.hero>*{position:relative;z-index:1}.hero h1{font-size:clamp(2rem,4vw,3.1rem);line-height:1.02;margin:0 0 .65rem;color:var(--text)!important}.hero p{max-width:650px;color:#c4c4ca;font-size:.92rem;line-height:1.65;margin:0}.hero .badge{display:inline-flex;align-items:center;gap:.45rem;width:fit-content;background:#ff9d3d1a;border:1px solid #ff9d3d47;border-radius:999px;padding:.32rem .7rem;font-size:.68rem;color:var(--brand2);margin-bottom:.85rem;letter-spacing:.08em;text-transform:uppercase}.hero .badge:before{content:"";width:6px;height:6px;background:var(--green);border-radius:50%;box-shadow:0 0 12px var(--green);animation:pulse 2s ease-in-out infinite}
-.card,.hub-card,.plan-card{background:linear-gradient(145deg,#19191deb,#101013e6);border:1px solid var(--line);border-radius:var(--radius);padding:1.2rem 1.35rem;margin-bottom:.75rem;position:relative;overflow:hidden;transition:all .22s var(--ease)}.card:before,.hub-card:before,.plan-card:before{content:"";position:absolute;left:0;top:0;height:1px;width:32%;background:linear-gradient(90deg,var(--brand),transparent);opacity:.75}.card:hover,.hub-card:hover,.plan-card:hover{border-color:var(--line2);transform:translateY(-3px);box-shadow:0 15px 42px #0003}.card.glow{border-color:#ff9d3d85;box-shadow:0 0 0 1px #ff9d3d14,0 16px 50px #ff9d3d14}.plan-card{min-height:255px}.plan-card.popular{border-color:#9b8cff9e;box-shadow:0 0 45px #9b8cff14}.plan-card.popular:after{content:'POPULAR';position:absolute;right:14px;top:13px;color:var(--violet);font-size:.62rem;font-weight:700;letter-spacing:.12em}.plan-card.current{border-color:#ff9d3d80}.hub-card h4{margin:0 0 .38rem;font-size:.98rem;color:var(--text)}.hub-card .desc{font-size:.84rem;color:var(--muted);margin-bottom:.5rem;line-height:1.55}.hub-card .meta{font-size:.73rem;color:var(--subtle)}
-.chat-wrap{display:flex;flex-direction:column;gap:.72rem;margin:.9rem 0}.bubble{max-width:82%;padding:.85rem 1rem;border-radius:15px;font-size:.88rem;line-height:1.65;animation:rise .35s var(--ease) both}.bubble.user{background:linear-gradient(135deg,#ff9d3d,#f47f35);color:#231207;align-self:flex-end;border-radius:16px 16px 4px 16px;box-shadow:0 8px 24px #ff9d3d21}.bubble.bot{background:var(--panel);color:var(--text);align-self:flex-start;border:1px solid var(--line);border-radius:16px 16px 16px 4px}.bubble .sender{font-size:.67rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:.35rem;opacity:.62}.tag{display:inline-block;background:#1b1b20;border:1px solid var(--line);border-radius:999px;padding:.2rem .66rem;font-size:.71rem;color:var(--muted);margin:.12rem;transition:all .18s}.tag:hover{border-color:var(--brand);color:var(--brand2);transform:translateY(-1px)}.tag.acc{background:#9b8cff1a;border-color:#9b8cff47;color:#b9b0ff}.pill{display:inline-block;background:#ff9d3d17;border:1px solid #ff9d3d38;border-radius:999px;padding:.25rem .75rem;font-size:.74rem;color:var(--brand2);font-family:'DM Mono',monospace}.key-box{background:#101013;border:1px dashed #ff9d3d73;border-radius:var(--small);padding:.78rem 1rem;font-size:.8rem;color:var(--brand2);word-break:break-all}.stat-num{font-family:'Space Grotesk',sans-serif;font-size:2.25rem;font-weight:700;color:var(--text);line-height:1}.stat-lbl{font-size:.7rem;color:var(--subtle);margin-top:.35rem;letter-spacing:.05em}.note{background:#6bdcff12;border:1px solid #6bdcff33;border-radius:var(--small);padding:.72rem 1rem;color:#9eeaff;font-size:.82rem;margin:.55rem 0}.warn{background:#ff747414;border:1px solid #ff747447;border-radius:var(--small);padding:.72rem 1rem;color:#ffadad;font-size:.82rem;margin:.55rem 0}.ok{background:#69d89b14;border:1px solid #69d89b40;border-radius:var(--small);padding:.72rem 1rem;color:#9af0bd;font-size:.82rem;margin:.55rem 0}.admin-bar{background:linear-gradient(90deg,#9b8cff24,transparent 78%);border-left:3px solid var(--violet);border-radius:0 var(--small) var(--small) 0;padding:.62rem 1rem;color:#bcb4ff;font-size:.8rem;margin-bottom:1rem}.divider{border:none;border-top:1px solid var(--line);margin:1.45rem 0}div[data-testid=stVerticalBlock]{gap:.55rem}div[data-testid=metric-container]{background:var(--panel);border:1px solid var(--line);border-radius:var(--small);padding:1rem}div[data-testid=metric-container] label{color:var(--subtle)!important;font-size:.73rem!important}div[data-testid=stProgressBar]>div{background:#27272a!important;border-radius:999px!important}div[data-testid=stProgressBar]>div>div{background:linear-gradient(90deg,var(--brand),var(--violet))!important;border-radius:999px!important}::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:#36363e;border-radius:99px}
-@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}@keyframes float{0%,100%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(-16px,14px,0) scale(1.06)}}@keyframes pulse{0%,100%{opacity:.55;transform:scale(.82)}50%{opacity:1;transform:scale(1.16)}}@keyframes shine{0%,45%{transform:translateX(-120%)}70%,100%{transform:translateX(120%)}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}@media(max-width:760px){.hero{min-height:150px;padding:1.5rem}.hero h1{font-size:2rem}.bubble{max-width:94%}.card,.hub-card,.plan-card{padding:1rem}}
+:root{
+  --bg:#09090b;
+  --panel:#151518;
+  --panel2:#1b1b20;
+  --line:#2b2b31;
+  --line2:#404047;
+  --text:#f4f4f5;
+  --muted:#a1a1aa;
+  --subtle:#71717a;
+  --brand:#ff9d3d;
+  --brand2:#ffb45e;
+  --violet:#9b8cff;
+  --cyan:#6bdcff;
+  --green:#34d399;
+  --radius:12px;
+  --small:8px;
+}
+html,body,[class*=css]{font-family:Inter,sans-serif;background:var(--bg)!important;color:var(--text)}
+section[data-testid=stSidebar]{background:linear-gradient(180deg, #08080a, #0c0c0f) !important;border-right:1px solid var(--line) !important}
+
+/* Inputs */
+input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div{background:var(--panel2)!important;border:1px solid var(--line)!important;color:var(--text)!important;border-radius:10px}
+
+/* Buttons */
+.stButton>button{background:linear-gradient(90deg,var(--brand),var(--brand2))!important;color:#1a1208!important;border-radius:10px;border:none;padding:.6rem .9rem;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.45)}
+.stButton>button[kind=secondary]{background:transparent!important;border:1px solid var(--line);color:var(--subtle)!important}
+
+/* Hero */
+.hero{position:relative;overflow:hidden;min-height:160px;display:flex;flex-direction:column;justify-content:flex-end;padding:1.6rem;border-radius:16px;background:linear-gradient(135deg,#0f0f12 0%, #121216 60%);border:1px solid rgba(255,255,255,0.02)}
+.hero h1{font-family:'Space Grotesk',sans-serif;font-size:2rem;margin:0;background:linear-gradient(90deg,var(--violet),var(--brand2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{color:var(--muted);margin:.35rem 0 1rem}
+.hero .badge{position:absolute;right:1rem;top:1rem;background:linear-gradient(90deg,var(--brand),var(--violet));padding:.45rem .7rem;border-radius:999px;font-weight:700;color:#120a05;box-shadow:0 6px 18px rgba(0,0,0,.45);transform:translateY(-2px);}
+
+/* Cards */
+.card,.hub-card,.plan-card{background:linear-gradient(145deg,#141417,#0f0f11);border:1px solid var(--line);border-radius:12px;padding:1rem;margin-bottom:.75rem}
+
+/* Hub card */
+.hub-card h4{margin:0;font-size:1rem}
+.hub-card .meta{color:var(--subtle);font-size:.82rem}
+.hub-card .desc{color:var(--muted);font-size:.9rem;margin-top:.35rem}
+
+/* Chat bubbles */
+.chat-wrap{display:flex;flex-direction:column;gap:.6rem;margin:.6rem 0}
+.bubble{max-width:86%;padding:.7rem .9rem;border-radius:12px;font-size:.92rem;line-height:1.5;animation:rise .28s cubic-bezier(.2,.9,.2,1)}
+.bubble.user{align-self:flex-end;background:linear-gradient(90deg,var(--brand),var(--brand2));color:#1a1208}
+.bubble.assistant{align-self:flex-start;background:#111217;color:var(--text);border:1px solid var(--line2)}
+
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* small text */
+.small{font-size:.78rem;color:var(--subtle)}
 </style>
 """
 
@@ -26,15 +67,17 @@ def inject_css():
 
 def hero(title: str, sub: str = "", badge: str = ""):
     badge_html = f'<div class="badge">{badge}</div>' if badge else ""
-    st.markdown(f'<div class="hero">{badge_html}<h1>{title}</h1>{"<p>" + sub + "</p>" if sub else ""}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero">{badge_html}<h1>{title}</h1>{("<p>"+sub+"</p>") if sub else ""}</div>', unsafe_allow_html=True)
 
 
 def card(content_html: str, glow: bool = False):
-    st.markdown(f'<div class="{"card glow" if glow else "card"}">{content_html}</div>', unsafe_allow_html=True)
+    class_name = "card glow" if glow else "card"
+    st.markdown(f'<div class="{class_name}">{content_html}</div>', unsafe_allow_html=True)
 
 
 def tag(text: str, accent: bool = False) -> str:
-    return f'<span class="{"tag acc" if accent else "tag"}">{text}</span>'
+    cls = "tag acc" if accent else "tag"
+    return f'<span class="{cls}">{text}</span>'
 
 
 def tags_html(tags: list, accent: bool = False) -> str:
@@ -44,18 +87,20 @@ def tags_html(tags: list, accent: bool = False) -> str:
 def sidebar_nav(user: dict) -> str:
     plan = PLANS[user["plan"]]
     with st.sidebar:
-        st.markdown(f'''<div style="padding:.55rem 0 1rem;text-align:left"><div style="display:flex;align-items:center;gap:.55rem;font-family:'Space Grotesk';font-size:1.2rem;font-weight:700;letter-spacing:-.04em;color:var(--text)"><span style="display:grid;place-items:center;width:31px;height:31px;border-radius:10px;background:linear-gradient(135deg,var(--brand),#ff7043);color:#231207;box-shadow:0 5px 20px #ff9d3d40">✦</span>Asian Inference</div><div style="font-size:.67rem;color:var(--subtle);margin:.42rem 0 0 2.45rem;letter-spacing:.08em">MODEL WORKSPACE</div></div>''', unsafe_allow_html=True)
-        st.markdown(f'''<div style="background:linear-gradient(145deg,#ff9d3d17,#15151880);border:1px solid var(--line);border-radius:var(--small);padding:.85rem .9rem;margin-bottom:1rem"><div style="font-size:.67rem;color:var(--subtle);letter-spacing:.08em;text-transform:uppercase">Workspace</div><div style="font-family:'Space Grotesk';font-weight:600;color:var(--text);margin:.28rem 0 .12rem;font-size:.94rem">{user.get('name') or 'User'}</div><div style="font-size:.71rem;color:var(--subtle);margin-bottom:.6rem;overflow:hidden;text-overflow:ellipsis">{user['email']}</div><span class="pill">{plan['badge']} {plan['name']}</span><span style="color:var(--subtle);font-size:.71rem;margin-left:.35rem">{user['tokens']:,} tokens</span></div>''', unsafe_allow_html=True)
+        st.markdown(f'''<div style="padding:.55rem 0 1rem;text-align:left"><div style="display:flex;align-items:center;gap:.55rem;font-family:'Space Grotesk';font-size:1.1rem;font-weight:700">✦ <div style="font-size:0.95rem;margin-left:.2rem">Asian Inference</div></div></div>''', unsafe_allow_html=True)
+
+        st.markdown(f'''<div style="background:linear-gradient(145deg,#ff9d3d12,#15151880);border:1px solid var(--line);border-radius:8px;padding:.75rem .9rem;margin-bottom:1rem"><div style="font-size:.75rem;color:var(--subtle)">Plan</div><div style="font-weight:700;margin-top:.28rem">{plan['badge']} {plan['name']}</div><div style="margin-top:.5rem;font-size:.82rem;color:var(--muted)">🪙 {user['tokens']:,} tokens</div></div>''', unsafe_allow_html=True)
+
         pages = ["🏠  Home", "💬  Dataset Chat", "🤖  My Models", "📦  Dataset Hub", "🌐  Model Hub", "🔑  API Keys", "⚡  Upgrade", "💬  Support"]
         if user["email"] == ADMIN_EMAIL:
             pages.append("👑  Admin")
-        choice = st.radio("Navigation", pages, label_visibility="collapsed")
-        st.markdown('<hr class="divider" style="margin:.65rem 0">', unsafe_allow_html=True)
+        choice = st.radio("", pages, label_visibility="collapsed")
+        st.markdown('<hr style="opacity:.06;margin:.6rem 0">', unsafe_allow_html=True)
         if st.button("Sign out", use_container_width=True, type="secondary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
-        st.markdown('<div style="font-size:.67rem;color:var(--subtle);text-align:left;margin-top:.7rem;padding-left:.25rem">Private by default · built for builders</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small" style="margin-top:.6rem">Private by default · built for builders</div>', unsafe_allow_html=True)
     return choice
 
 
@@ -64,10 +109,11 @@ def plan_cards_auth():
     for i, (pid, p) in enumerate(PLANS.items()):
         with cols[i]:
             price = "Free" if p["price"] == 0 else f"${p['price']}/mo"
-            feats = [f"{p['monthly_tokens']:,} tokens/month", f"Up to {p['max_rows']:,} rows/dataset", f"{p['max_datasets']} datasets · {p['max_models']} models", "Public sharing" if p["share"] else "Private only", f"{p['api_keys']} API key{'s' if p['api_keys'] != 1 else ''}"]
+            feats = [f"{p['monthly_tokens']:,} tokens/month", f"Up to {p['max_rows']:,} rows/dataset", f"{p['max_datasets']} datasets · {p['max_models']} models", "Public sharing" if p["share"] else "Private only"]
             classes = (' popular' if i == 1 else '') + (' current' if i == 0 else '')
-            feats_html = ''.join(f'<div style="display:flex;align-items:center;gap:.5rem;margin:.45rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>' for feature in feats)
-            st.markdown(f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.55rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700;color:var(--text);margin-bottom:.32rem">{p['name']}</div><div style="font-family:'Space Grotesk';font-size:2rem;font-weight:700;color:var(--text);line-height:1">{price}</div><div style="font-size:.72rem;color:var(--subtle);margin:.45rem 0 1.1rem">{'via Traakteer · cancel anytime' if p['price'] > 0 else 'forever free'}</div>{feats_html}</div>''', unsafe_allow_html=True)
-            if st.button("Selected" if st.session_state.get("selected_plan") == pid else f"Choose {p['name']}", key=f"auth_plan_{pid}", use_container_width=True, disabled=st.session_state.get("selected_plan") == pid):
+            feats_html = ''.join(f'<div style="display:flex;align-items:center;gap:.5rem;margin:.35rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>' for feature in feats)
+            st.markdown(f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.45rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700">{p['name']}</div><div style="font-size:1.05rem;margin-top:.25rem;font-weight:600">{price}</div>{feats_html}</div>''', unsafe_allow_html=True)
+            btn_label = "Selected" if st.session_state.get("selected_plan") == pid else f"Choose {p['name']}"
+            if st.button(btn_label, key=f"auth_plan_{pid}", use_container_width=True):
                 st.session_state["selected_plan"] = pid
                 st.rerun()
