@@ -72,6 +72,8 @@ def page_auth():
   <p>Build AI datasets with a chatbot · Fine-tune models · Share with the community<br>
      Like HuggingFace — but yours. No HF account needed to use it.</p>
 </div>""", unsafe_allow_html=True)
+    selected_plan = st.session_state.get("selected_plan", "starter")
+    st.markdown(f'<div class="note">Selected plan: <b>{PLANS[selected_plan]["name"]}</b>. Choose a different plan below if needed.</div>', unsafe_allow_html=True)
 
     col_l, col_r = st.columns([1, 1], gap="large")
     with col_l:
@@ -81,13 +83,16 @@ def page_auth():
                 email = st.text_input("Email", placeholder="you@example.com")
                 pw    = st.text_input("Password", type="password")
                 if st.form_submit_button("Sign in →", use_container_width=True):
-                    ok, msg, user = login(email, pw)
-                    if ok:
-                        st.session_state["ue"] = user["email"]
-                        st.session_state["ia"] = user["email"] == ADMIN_EMAIL
-                        st.rerun()
-                    else:
-                        st.error(msg)
+                    try:
+                        ok, msg, user = login(email, pw)
+                        if ok:
+                            st.session_state["ue"] = user["email"]
+                            st.session_state["ia"] = user["email"] == ADMIN_EMAIL
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    except Exception:
+                        st.error("We could not access your account database. Please try again shortly.")
 
         with tab_up:
             with st.form("reg_form"):
@@ -99,8 +104,11 @@ def page_auth():
                     if pw != pw2:
                         st.error("Passwords don't match.")
                     else:
-                        ok, msg = register(email, pw, name)
-                        st.success("✅ " + msg + "  Sign in above.") if ok else st.error(msg)
+                        try:
+                            ok, msg = register(email, pw, name)
+                            st.success("✅ " + msg + "  Sign in above.") if ok else st.error(msg)
+                        except Exception:
+                            st.error("We could not create your account database record. Please try again shortly.")
 
     with col_r:
         st.markdown("### Plans")
@@ -270,8 +278,11 @@ def page_dataset_chat(user):
 
                     if deduct_tokens(user, cost):
                         try:
-                            did = save_dataset(user["email"], ds_name, ds_desc,
-                                               rows, public, tags)
+                            with st.status("Saving securely…", expanded=False) as storage_status:
+                                storage_status.update(label="Uploading dataset to secure storage…")
+                                did = save_dataset(user["email"], ds_name, ds_desc,
+                                                   rows, public, tags)
+                                storage_status.update(label="Dataset saved", state="complete")
                         except (PlanLimitError, StorageUnavailableError) as exc:
                             user["tokens"] += cost
                             st.error(str(exc))
@@ -481,7 +492,8 @@ def page_my_models(user):
             if submitted:
                 if not mname:    st.error("Model name required."); st.stop()
                 if not base:     st.error("Base model required."); st.stop()
-                out_repo = make_model_repo(user["email"], mname)
+                with st.spinner("Preparing secure model storage…"):
+                    out_repo = make_model_repo(user["email"], mname)
                 if not out_repo:
                     st.error(storage_diagnostic()); st.stop()
 

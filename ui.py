@@ -68,3 +68,6 @@ def plan_cards_auth():
             classes = (' popular' if i == 1 else '') + (' current' if i == 0 else '')
             feats_html = ''.join(f'<div style="display:flex;align-items:center;gap:.5rem;margin:.45rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>' for feature in feats)
             st.markdown(f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.55rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700;color:var(--text);margin-bottom:.32rem">{p['name']}</div><div style="font-family:'Space Grotesk';font-size:2rem;font-weight:700;color:var(--text);line-height:1">{price}</div><div style="font-size:.72rem;color:var(--subtle);margin:.45rem 0 1.1rem">{'via Traakteer · cancel anytime' if p['price'] > 0 else 'forever free'}</div>{feats_html}</div>''', unsafe_allow_html=True)
+            if st.button("Selected" if st.session_state.get("selected_plan") == pid else f"Choose {p['name']}", key=f"auth_plan_{pid}", use_container_width=True, disabled=st.session_state.get("selected_plan") == pid):
+                st.session_state["selected_plan"] = pid
+                st.rerun()

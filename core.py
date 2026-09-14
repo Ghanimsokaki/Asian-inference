@@ -63,7 +63,10 @@ def load_db() -> dict:
     return {"users": {}, "datasets": {}, "models": {}, "support_tickets": [], "api_index": {}}
 
 def save_db(db: dict):
-    DB_FILE.write_text(json.dumps(db, indent=2, default=str))
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DB_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(db, indent=2, default=str), encoding="utf-8")
+    tmp.replace(DB_FILE)
 
 def load_rates() -> dict:
     if RATE_FILE.exists():
@@ -72,7 +75,10 @@ def load_rates() -> dict:
     return {}
 
 def save_rates(r: dict):
-    RATE_FILE.write_text(json.dumps(r, default=str))
+    RATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(r, default=str), encoding="utf-8")
+    tmp.replace(RATE_FILE)
 
 # ── Security ─────────────────────────────────────────────────────────
 def hash_pw(pw: str) -> str:
