@@ -90,6 +90,13 @@ application database keeps only lightweight metadata and opaque object paths. Co
 server-side `HF_TOKEN` secret with a Hugging Face write token. Do not expose that token in the
 Streamlit UI or commit it to the repository.
 
+Storage follows the subscription plan limits: Starter allows 2 datasets and 2 model artifacts,
+Pro allows 6 of each, and Elite has effectively unlimited slots. Dataset row limits are enforced
+server-side as 50, 2,000, and 50,000 rows respectively. Each model slot receives its own private,
+platform-managed Hugging Face repository, while a user’s datasets share a private platform
+dataset repository. If Hugging Face storage is unavailable, the operation fails cleanly and no
+local-only artifact is created.
+
 ---
 
 ## Traakteer billing setup

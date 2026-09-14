@@ -108,12 +108,12 @@ def delete_file(repo_id: str, path: str, token: str | None = None) -> bool:
         return False
 
 
-def make_model_repo(user_email: str, token: str | None = None) -> str | None:
+def make_model_repo(user_email: str, model_key: str = "model", token: str | None = None) -> str | None:
     """Create an opaque model repo in the platform HF namespace."""
     username = whoami(token)
     if not username:
         return None
-    slug = hashlib.sha256(user_email.encode()).hexdigest()[:12]
+    slug = hashlib.sha256(f"{user_email}:{model_key}".encode()).hexdigest()[:16]
     repo_id = f"{username}/gemby-model-{slug}"
     return repo_id if ensure_repo(repo_id, "model", token) else None
 

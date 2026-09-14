@@ -11,6 +11,7 @@ import core, ui, inference
 from hf_storage import make_model_repo, storage_diagnostic
 from core import (
     PLANS, ADMIN_EMAIL,
+    PlanLimitError, StorageUnavailableError,
     load_db, save_db,
     register, login, get_user, save_user,
     safe_add_tokens, deduct_tokens, rate_limit,
@@ -268,22 +269,27 @@ def page_dataset_chat(user):
                     prog.empty()
 
                     if deduct_tokens(user, cost):
-                        did = save_dataset(user["email"], ds_name, ds_desc,
-                                           rows, public, tags)
-                        save_user(user)
-                        st.session_state["pending_ds"]   = None
-                        st.session_state["last_ds"]      = rows
-                        st.session_state["last_ds_id"]   = did
-                        st.session_state["last_ds_name"] = ds_name
-                        st.session_state["chat"].append({
-                            "role": "bot",
-                            "content": (
-                                f"✅ Done! **{ds_name}** with {num_rows} rows saved to your account.\n\n"
-                                f"Used {cost:,} tokens — {user['tokens']:,} left.\n\n"
-                                "Download it below, or find it in the Dataset Hub."
-                            )
-                        })
-                        st.rerun()
+                        try:
+                            did = save_dataset(user["email"], ds_name, ds_desc,
+                                               rows, public, tags)
+                        except (PlanLimitError, StorageUnavailableError) as exc:
+                            user["tokens"] += cost
+                            st.error(str(exc))
+                        else:
+                            save_user(user)
+                            st.session_state["pending_ds"]   = None
+                            st.session_state["last_ds"]      = rows
+                            st.session_state["last_ds_id"]   = did
+                            st.session_state["last_ds_name"] = ds_name
+                            st.session_state["chat"].append({
+                                "role": "bot",
+                                "content": (
+                                    f"✅ Done! **{ds_name}** with {num_rows} rows saved to your account.\n\n"
+                                    f"Used {cost:,} tokens — {user['tokens']:,} left.\n\n"
+                                    "Download it below, or find it in the Dataset Hub."
+                                )
+                            })
+                            st.rerun()
 
         with col_r:
             cost_est = info.get("rows",10) * 10
@@ -475,7 +481,7 @@ def page_my_models(user):
             if submitted:
                 if not mname:    st.error("Model name required."); st.stop()
                 if not base:     st.error("Base model required."); st.stop()
-                out_repo = make_model_repo(user["email"])
+                out_repo = make_model_repo(user["email"], mname)
                 if not out_repo:
                     st.error(storage_diagnostic()); st.stop()
 
@@ -490,7 +496,10 @@ def page_my_models(user):
                     mname, base, out_repo, chosen_rows,
                     "", epochs, lr, mlen, batch)
 
-                mid = save_model(user["email"], mname, mdesc, base, out_repo, public, tags)
+                try:
+                    mid = save_model(user["email"], mname, mdesc, base, out_repo, public, tags)
+                except PlanLimitError as exc:
+                    st.error(str(exc)); st.stop()
                 save_user(user)
                 st.session_state["nb_json"] = nb
                 st.session_state["nb_name"] = mname

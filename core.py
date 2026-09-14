@@ -44,6 +44,14 @@ PLANS = {
     },
 }
 
+
+class PlanLimitError(RuntimeError):
+    """Raised when a user has reached the dataset or model slot limit."""
+
+
+class StorageUnavailableError(RuntimeError):
+    """Raised when platform-managed Hugging Face storage cannot be reached."""
+
 DB_FILE   = Path("db.json")
 RATE_FILE = Path("rate_limits.json")
 
@@ -197,6 +205,16 @@ def save_user(u: dict):
 def save_dataset(owner: str, name: str, desc: str,
                  rows: list, public: bool, tags: list) -> str:
     db  = load_db()
+    user = db["users"].get(owner)
+    if not user:
+        raise ValueError("Owner account not found.")
+    plan = PLANS[user["plan"]]
+    if owner != ADMIN_EMAIL and len(user.get("datasets", [])) >= plan["max_datasets"]:
+        raise PlanLimitError(f"Your {plan['name']} plan allows {plan['max_datasets']} datasets.")
+    if owner != ADMIN_EMAIL and len(rows) > plan["max_rows"]:
+        raise PlanLimitError(f"Your {plan['name']} plan allows {plan['max_rows']:,} rows per dataset.")
+    if public and not plan["share"]:
+        public = False
     did = str(uuid.uuid4())[:10]
     storage_repo = None
     storage_path = None
@@ -207,10 +225,12 @@ def save_dataset(owner: str, name: str, desc: str,
         storage_path = hf_storage_path(did)
         if storage_repo and put_json(storage_repo, storage_path, rows):
             storage_status = "huggingface"
-    except Exception:
-        # Keep metadata creation resilient; the UI can still show the dataset
-        # and administrators can repair storage after configuring HF_TOKEN.
-        storage_status = "local"
+        else:
+            raise StorageUnavailableError("Hugging Face dataset storage is unavailable.")
+    except StorageUnavailableError:
+        raise
+    except Exception as exc:
+        raise StorageUnavailableError("Hugging Face dataset storage is unavailable.") from exc
     db["datasets"][did] = {
         "id": did, "name": name, "description": desc,
         "owner": owner, "rows": rows, "public": public,
@@ -237,6 +257,14 @@ def get_user_datasets(email: str) -> list:
 def save_model(owner: str, name: str, desc: str, base_model: str,
                hf_repo: str, public: bool, tags: list) -> str:
     db  = load_db()
+    user = db["users"].get(owner)
+    if not user:
+        raise ValueError("Owner account not found.")
+    plan = PLANS[user["plan"]]
+    if owner != ADMIN_EMAIL and len(user.get("models", [])) >= plan["max_models"]:
+        raise PlanLimitError(f"Your {plan['name']} plan allows {plan['max_models']} models.")
+    if public and not plan["share"]:
+        public = False
     mid = str(uuid.uuid4())[:10]
     db["models"][mid] = {
         "id": mid, "name": name, "description": desc,
