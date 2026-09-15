@@ -172,9 +172,9 @@ def inject_audio(url: Optional[str] = None, autoplay: bool = False) -> None:
         return
 
     # Small HTML + JS for a play/pause button. Keep it minimal and resilient.
-    safe_html = f"""
+    safe_html = """
 <div class="bg-audio-ctl">
-  <audio id="gemby-bg-audio" src="{music}" loop preload="none"></audio>
+  <audio id="gemby-bg-audio" src="{MUSIC}" loop preload="none"></audio>
   <button id="gemby-audio-toggle" title="Play / pause">⏯️</button>
   <div class="label">Calm music</div>
 </div>
@@ -191,12 +191,36 @@ def inject_audio(url: Optional[str] = None, autoplay: bool = False) -> None:
       }catch(e){ console.log('audio error', e); }
     });
     // attempt autoplay if requested (may be blocked)
-    if({"true" if autoplay else "false"}){
+    if({AUTOPLAY}){
       audio.play().then(update).catch(function(e){console.log('autoplay blocked', e);});
     }
   }catch(e){ console.log('inject_audio init failed', e); }
 })();
 </script>
 """
+    # Replace placeholders safely to avoid f-string brace conflicts.
+    safe_html = safe_html.replace("{MUSIC}", music).replace("{AUTOPLAY}", "true" if autoplay else "false")
+
     # Use streamlit.components.v1.html to inject the control.
     st_html(safe_html, height=80)
+
+
+# Compatibility wrappers for original API expected by app.py
+
+def plan_cards():
+    """Backward-compatible alias used by app.py"""
+    return plan_cards_auth()
+
+
+def hub_card(name, owner, desc, tags, stats, is_public, extra_html=""):
+    """Render a hub card consistent with the previous implementation."""
+    vis = "🌐" if is_public else "🔒"
+    tags_html = ''.join(f'<span class="tag">{t}</span>' for t in (tags or []))
+    st.markdown(f"""
+<div class="hub-card">
+  <h4>{vis} {name}</h4>
+  <div class="desc">{desc or 'No description'}</div>
+  <div class="meta">{stats} {tags_html}</div>
+  {extra_html}
+</div>
+""", unsafe_allow_html=True)
