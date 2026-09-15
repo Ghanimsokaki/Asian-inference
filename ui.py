@@ -1,6 +1,13 @@
-"""ui.py — animated visual system, sidebar, shared components, and optional background audio helper."""
+"""ui.py — animated visual system, sidebar, shared components, and optional background audio helper.
+
+This file provides CSS injection, hero and card helpers, sidebar navigation, plan cards
+and a small floating audio player helper. It is written defensively to avoid
+syntax issues when embedded HTML/JS is used.
+"""
+from typing import Optional
 import streamlit as st
 from core import PLANS, ADMIN_EMAIL
+from streamlit.components.v1 import html as st_html
 
 # Polished CSS with subtle animations and readable variables.
 CSS = """
@@ -40,7 +47,7 @@ input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div
 .hero{position:relative;overflow:hidden;min-height:160px;display:flex;flex-direction:column;justify-content:flex-end;padding:1.6rem;border-radius:16px;background:linear-gradient(135deg,#0f0f12 0%, #121216 60%);border:1px solid rgba(255,255,255,0.02)}
 .hero h1{font-family:'Space Grotesk',sans-serif;font-size:2rem;margin:0;background:linear-gradient(90deg,var(--violet),var(--brand2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .hero p{color:var(--muted);margin:.35rem 0 1rem}
-.hero .badge{position:absolute;right:1rem;top:1rem;background:linear-gradient(90deg,var(--brand),var(--violet));padding:.45rem .7rem;border-radius:999px;font-weight:700;color:#120a05;box-shadow:0 6px 18px rgba(0,0,0,.45);transform:translateY(-2px);}
+.hero .badge{position:absolute;right:1rem;top:1rem;background:linear-gradient(90deg,var(--brand),var(--violet));padding:.45rem .7rem;border-radius:999px;font-weight:700;color:#120a05;box-shadow:0 6px 18px rgba(0,0,0,.45);transform:translateY(-2px)}
 
 /* Cards */
 .card,.hub-card,.plan-card{background:linear-gradient(145deg,#141417,#0f0f11);border:1px solid var(--line);border-radius:12px;padding:1rem;margin-bottom:.75rem}
@@ -70,16 +77,18 @@ input,textarea,.stTextInput input,.stTextArea textarea,[data-baseweb=select]>div
 """
 
 
-def inject_css():
+def inject_css() -> None:
+    """Inject the shared CSS into the Streamlit app."""
     st.markdown(CSS, unsafe_allow_html=True)
 
 
-def hero(title: str, sub: str = "", badge: str = ""):
+def hero(title: str, sub: str = "", badge: str = "") -> None:
+    """Render a hero banner with optional badge."""
     badge_html = f'<div class="badge">{badge}</div>' if badge else ""
     st.markdown(f'<div class="hero">{badge_html}<h1>{title}</h1>{("<p>"+sub+"</p>") if sub else ""}</div>', unsafe_allow_html=True)
 
 
-def card(content_html: str, glow: bool = False):
+def card(content_html: str, glow: bool = False) -> None:
     class_name = "card glow" if glow else "card"
     st.markdown(f'<div class="{class_name}">{content_html}</div>', unsafe_allow_html=True)
 
@@ -94,14 +103,29 @@ def tags_html(tags: list, accent: bool = False) -> str:
 
 
 def sidebar_nav(user: dict) -> str:
+    """Render the sidebar navigation and return the chosen page label."""
     plan = PLANS[user["plan"]]
     with st.sidebar:
-        st.markdown(f'''<div style="padding:.55rem 0 1rem;text-align:left"><div style="display:flex;align-items:center;gap:.55rem;font-family:'Space Grotesk';font-size:1.1rem;font-weight:700">✦ <div style="font-size:0.95rem;margin-left:.2rem">Asian Inference</div></div></div>''', unsafe_allow_html=True)
+        st.markdown(
+            '''
+            <div style="padding:.55rem 0 1rem;text-align:left">
+              <div style="display:flex;align-items:center;gap:.55rem;font-family:'Space Grotesk';font-size:1.1rem;font-weight:700">
+                ✦ <div style="font-size:0.95rem;margin-left:.2rem">Asian Inference</div>
+              </div>
+            </div>
+            ''', unsafe_allow_html=True)
 
-        st.markdown(f'''<div style="background:linear-gradient(145deg,#ff9d3d12,#15151880);border:1px solid var(--line);border-radius:8px;padding:.75rem .9rem;margin-bottom:1rem"><div style="font-size:.75rem;color:var(--subtle)">Plan</div><div style="font-weight:700;margin-top:.28rem">{plan['badge']} {plan['name']}</div><div style="margin-top:.5rem;font-size:.82rem;color:var(--muted)">🪙 {user['tokens']:,} tokens</div></div>''', unsafe_allow_html=True)
+        st.markdown(
+            f'''
+            <div style="background:linear-gradient(145deg,#ff9d3d12,#15151880);border:1px solid var(--line);border-radius:8px;padding:.75rem .9rem;margin-bottom:1rem">
+              <div style="font-size:.75rem;color:var(--subtle)">Plan</div>
+              <div style="font-weight:700;margin-top:.28rem">{plan['badge']} {plan['name']}</div>
+              <div style="margin-top:.5rem;font-size:.82rem;color:var(--muted)">🪙 {user['tokens']:,} tokens</div>
+            </div>
+            ''', unsafe_allow_html=True)
 
         pages = ["🏠  Home", "💬  Dataset Chat", "🤖  My Models", "📦  Dataset Hub", "🌐  Model Hub", "🔑  API Keys", "⚡  Upgrade", "💬  Support"]
-        if user["email"] == ADMIN_EMAIL:
+        if user.get("email") == ADMIN_EMAIL:
             pages.append("👑  Admin")
         choice = st.radio("", pages, label_visibility="collapsed")
         st.markdown('<hr style="opacity:.06;margin:.6rem 0">', unsafe_allow_html=True)
@@ -113,15 +137,21 @@ def sidebar_nav(user: dict) -> str:
     return choice
 
 
-def plan_cards_auth():
+def plan_cards_auth() -> None:
     cols = st.columns(3)
     for i, (pid, p) in enumerate(PLANS.items()):
         with cols[i]:
             price = "Free" if p["price"] == 0 else f"${p['price']}/mo"
             feats = [f"{p['monthly_tokens']:,} tokens/month", f"Up to {p['max_rows']:,} rows/dataset", f"{p['max_datasets']} datasets · {p['max_models']} models", "Public sharing" if p["share"] else "Private only"]
             classes = (' popular' if i == 1 else '') + (' current' if i == 0 else '')
-            feats_html = ''.join(f'<div style="display:flex;align-items:center;gap:.5rem;margin:.35rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>' for feature in feats)
-            st.markdown(f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.45rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700">{p['name']}</div><div style="font-size:1.05rem;margin-top:.25rem;font-weight:600">{price}</div>{feats_html}</div>''', unsafe_allow_html=True)
+            feats_html = ''.join(
+                f'<div style="display:flex;align-items:center;gap:.5rem;margin:.35rem 0;font-size:.8rem;color:var(--muted)"><span style="color:var(--green)">✓</span>{feature}</div>'
+                for feature in feats
+            )
+            st.markdown(
+                f'''<div class="plan-card{classes}"><div style="font-size:1.45rem;margin-bottom:.45rem">{p['badge']}</div><div style="font-family:'Space Grotesk';font-size:1.05rem;font-weight:700">{p['name']}</div><div style="font-size:1.05rem;margin-top:.25rem;font-weight:600">{price}</div>{feats_html}</div>''',
+                unsafe_allow_html=True,
+            )
             btn_label = "Selected" if st.session_state.get("selected_plan") == pid else f"Choose {p['name']}"
             if st.button(btn_label, key=f"auth_plan_{pid}", use_container_width=True):
                 st.session_state["selected_plan"] = pid
@@ -132,26 +162,41 @@ def plan_cards_auth():
 # Provide a calm music URL in Streamlit secrets as MUSIC_URL or pass url param.
 # Usage: ui.inject_audio() or ui.inject_audio('https://example.com/mycalm.mp3')
 
-def inject_audio(url: str | None = None, autoplay: bool = False):
-    music = url or st.secrets.get("MUSIC_URL") if hasattr(st, 'secrets') else url
+def inject_audio(url: Optional[str] = None, autoplay: bool = False) -> None:
+    """Render a floating audio control. Autoplay may be blocked by the browser.
+
+    The function uses st.secrets['MUSIC_URL'] if url is not provided.
+    """
+    music = url or (st.secrets.get("MUSIC_URL") if hasattr(st, "secrets") else None)
     if not music:
-        # nothing to do
         return
-    # Render a floating player with a simple play/pause button. Autoplay is only attempted after user gesture.
-    html = f"""
+
+    # Small HTML + JS for a play/pause button. Keep it minimal and resilient.
+    safe_html = f"""
 <div class="bg-audio-ctl">
-  <audio id="gemby-bg-audio" src="{music}" loop></audio>
+  <audio id="gemby-bg-audio" src="{music}" loop preload="none"></audio>
   <button id="gemby-audio-toggle" title="Play / pause">⏯️</button>
   <div class="label">Calm music</div>
 </div>
 <script>
-const audio = document.getElementById('gemby-bg-audio');
-const btn = document.getElementById('gemby-audio-toggle');
-btn.addEventListener('click', ()=>{
+(function(){
   try{
-    if(audio.paused){ audio.play(); btn.innerText='⏸️'; }
-    else { audio.pause(); btn.innerText='⏯️'; }
-  }catch(e){ console.log('Audio play failed', e); alert('Unable to play audio — check browser autoplay policies or provide a user gesture.'); }
-});
-// If autoplay requested, try to play (may be blocked until user gesture).
-if(
+    const audio = document.getElementById('gemby-bg-audio');
+    const btn = document.getElementById('gemby-audio-toggle');
+    function update(){ btn.innerText = audio.paused ? '⏯️' : '⏸️'; }
+    btn.addEventListener('click', function(){
+      try{
+        if(audio.paused){ audio.play(); } else { audio.pause(); }
+        update();
+      }catch(e){ console.log('audio error', e); }
+    });
+    // attempt autoplay if requested (may be blocked)
+    if({"true" if autoplay else "false"}){
+      audio.play().then(update).catch(function(e){console.log('autoplay blocked', e);});
+    }
+  }catch(e){ console.log('inject_audio init failed', e); }
+})();
+</script>
+"""
+    # Use streamlit.components.v1.html to inject the control.
+    st_html(safe_html, height=80)
