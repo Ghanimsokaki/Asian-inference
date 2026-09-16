@@ -1,1169 +1,1297 @@
 """
-⚡ Asian Inference Platform — app.py
-Streamlit Cloud entry point
+⚡ Asian Inference — Streamlit entry point.
+
+Pages are thin: they collect input, call :mod:`core`, and render the result.
+Every rule (quotas, pricing, ownership, token accounting) lives in the domain
+layer so it holds no matter which surface triggers it.
 """
-import json, uuid, re
+from __future__ import annotations
+
+import json
+
 import pandas as pd
 import streamlit as st
-from datetime import datetime
 
-import core, ui, inference
-from hf_storage import make_model_repo, storage_diagnostic
-from core import (
-    PLANS, ADMIN_EMAIL,
-    PlanLimitError, StorageUnavailableError,
-    load_db, save_db,
-    register, login, get_user, save_user,
-    safe_add_tokens, deduct_tokens, rate_limit,
-    save_dataset, get_public_datasets, get_user_datasets,
-    save_model, get_public_models, get_user_models,
-    generate_api_key, revoke_api_key,
+import billing
+import core
+import inference
+import store
+import ui
+from config import (
+    ADMIN_EMAIL, APP_ICON, APP_NAME, PLANS, TOKENS_PER_ROW,
+    USING_DEFAULT_SECRET, display_limit, is_admin, plan_for,
 )
+from ui import esc
 
 st.set_page_config(
-    page_title="Asian Inference",
-    page_icon="⚡",
+    page_title=APP_NAME,
+    page_icon=APP_ICON,
     layout="wide",
     initial_sidebar_state="expanded",
 )
 ui.inject_css()
+core.bootstrap()
 
-# ─────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────
-def _over_limit(user, kind):
-    if user["email"] == ADMIN_EMAIL:
-        return False
-    return len(user.get(kind, [])) >= PLANS[user["plan"]][f"max_{kind}"]
+SESSION_EMAIL = "user_email"
 
-def _limit_warn(user, kind):
-    plan  = PLANS[user["plan"]]
-    limit = plan[f"max_{kind}"]
-    st.markdown(f'<div class="warn">⚠️ You\'ve hit your {kind} limit ({limit}) on the '
-                f'<b>{plan["name"]}</b> plan. Upgrade to create more.</div>',
-                unsafe_allow_html=True)
-    if st.button("⚡ Upgrade now", key=f"ulim_{kind}"):
-        st.session_state["_page"] = "⚡  Upgrade"
+
+# ─────────────────────────────────────────────────────────────────────
+# SHARED HELPERS
+# ─────────────────────────────────────────────────────────────────────
+def _limit_warning(user: dict, kind: str) -> None:
+    plan = plan_for(user["plan"])
+    st.markdown(
+        f'<div class="warn">⚠️ You have used every {kind} slot '
+        f'({plan[f"max_{kind}"]}) on the <b>{esc(plan["name"])}</b> plan. '
+        "Delete one, or upgrade for more.</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("⚡ See upgrade options", key=f"upsell_{kind}"):
+        ui.go_to("⚡  Upgrade")
         st.rerun()
 
-def _ds_downloads(ds):
-    df = pd.DataFrame(ds["rows"])
-    did = ds["id"]
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.download_button("⬇ CSV", df.to_csv(index=False),
-            f"{did}.csv", "text/csv", key=f"csv_{did}", use_container_width=True)
-    with c2:
-        st.download_button("⬇ JSON", json.dumps(ds["rows"], indent=2),
-            f"{did}.json", "application/json", key=f"json_{did}", use_container_width=True)
-    with c3:
-        st.download_button("⬇ JSONL",
-            "\n".join(json.dumps(r) for r in ds["rows"]),
-            f"{did}.jsonl", "application/json", key=f"jl_{did}", use_container_width=True)
 
-# ─────────────────────────────────────────────────────────────────
+def _download_buttons(dataset_id: str, rows: list[dict], key_prefix: str = "") -> None:
+    """CSV / JSON / JSONL download buttons for a set of rows."""
+    if not rows:
+        st.caption("This dataset has no rows to download.")
+        return
+    frame = pd.DataFrame(rows)
+    prefix = key_prefix or dataset_id
+    col1, col2, col3 = st.columns(3)
+    counted = {"on_click": store.increment_dataset_downloads, "args": (dataset_id,)}
+    with col1:
+        st.download_button(
+            "⬇ CSV", frame.to_csv(index=False), f"{dataset_id}.csv", "text/csv",
+            key=f"csv_{prefix}", use_container_width=True, **counted,
+        )
+    with col2:
+        st.download_button(
+            "⬇ JSON", json.dumps(rows, indent=2, ensure_ascii=False),
+            f"{dataset_id}.json", "application/json",
+            key=f"json_{prefix}", use_container_width=True, **counted,
+        )
+    with col3:
+        st.download_button(
+            "⬇ JSONL", "\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+            f"{dataset_id}.jsonl", "application/jsonl",
+            key=f"jsonl_{prefix}", use_container_width=True, **counted,
+        )
+
+
+def _run_inference(repo: str, prompt: str, email: str, output_key: str) -> None:
+    """Shared 'try this model' handler with rate limiting and typed errors."""
+    if not core.rate_limit(email, "inference"):
+        st.error("Rate limit reached — 5 inference calls per minute.")
+        return
+    try:
+        with st.spinner("Running…"):
+            output = inference.call_hf(repo, prompt)
+    except inference.ModelLoadingError as exc:
+        st.warning(str(exc))
+    except inference.InferenceError as exc:
+        st.error(str(exc))
+    else:
+        st.text_area("Output", output, height=140, key=output_key, disabled=True)
+
+
+# ─────────────────────────────────────────────────────────────────────
 # AUTH
-# ─────────────────────────────────────────────────────────────────
-def page_auth():
-    st.markdown("""
-<div class="hero">
-  <div class="badge">BETA · YOUR OWN AI PLATFORM</div>
-  <h1>⚡ Asian Inference</h1>
-  <p>Build AI datasets with a chatbot · Fine-tune models · Share with the community<br>
-     Like HuggingFace — but yours. No HF account needed to use it.</p>
-</div>""", unsafe_allow_html=True)
-    selected_plan = st.session_state.get("selected_plan", "starter")
-    st.markdown(f'<div class="note">Selected plan: <b>{PLANS[selected_plan]["name"]}</b>. Choose a different plan below if needed.</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────
+def page_auth() -> None:
+    st.markdown(
+        '<div class="hero">'
+        '<div class="badge">BETA · YOUR OWN AI PLATFORM</div>'
+        f"<h1>{APP_ICON} {esc(APP_NAME)}</h1>"
+        "<p>Build AI datasets with a chatbot · Fine-tune models · Share with the "
+        "community.<br>Like Hugging Face — but yours. No Hugging Face account needed.</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
-    col_l, col_r = st.columns([1, 1], gap="large")
-    with col_l:
+    selected = st.session_state.get("selected_plan", "starter")
+    st.markdown(
+        f'<div class="note">Selected plan: <b>{esc(plan_for(selected)["name"])}</b>. '
+        "You can change plans any time after signing up.</div>",
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
         tab_in, tab_up = st.tabs(["Sign in", "Create account"])
+
         with tab_in:
             with st.form("login_form"):
                 email = st.text_input("Email", placeholder="you@example.com")
-                pw    = st.text_input("Password", type="password")
-                if st.form_submit_button("Sign in →", use_container_width=True):
-                    try:
-                        ok, msg, user = login(email, pw)
-                        if ok:
-                            st.session_state["ue"] = user["email"]
-                            st.session_state["ia"] = user["email"] == ADMIN_EMAIL
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    except Exception:
-                        st.error("We could not access your account database. Please try again shortly.")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Sign in →", use_container_width=True)
+            if submitted:
+                ok, message, user = core.login(email, password)
+                if ok and user:
+                    st.session_state[SESSION_EMAIL] = user["email"]
+                    st.rerun()
+                else:
+                    st.error(message)
 
         with tab_up:
-            with st.form("reg_form"):
-                name  = st.text_input("Full name")
-                email = st.text_input("Email", placeholder="you@example.com")
-                pw    = st.text_input("Password", type="password", help="Min 8 characters")
-                pw2   = st.text_input("Confirm password", type="password")
-                if st.form_submit_button("Create free account →", use_container_width=True):
-                    if pw != pw2:
-                        st.error("Passwords don't match.")
+            with st.form("register_form"):
+                name = st.text_input("Full name")
+                email = st.text_input("Email", placeholder="you@example.com", key="reg_email")
+                password = st.text_input(
+                    "Password", type="password",
+                    help=f"At least {core.MIN_PASSWORD_LENGTH} characters", key="reg_pw",
+                )
+                confirm = st.text_input("Confirm password", type="password", key="reg_pw2")
+                submitted = st.form_submit_button(
+                    "Create free account →", use_container_width=True
+                )
+            if submitted:
+                if password != confirm:
+                    st.error("Passwords don't match.")
+                else:
+                    ok, message = core.register(email, password, name)
+                    if ok:
+                        st.success(f"✅ {message} Sign in using the tab above.")
                     else:
-                        try:
-                            ok, msg = register(email, pw, name)
-                            st.success("✅ " + msg + "  Sign in above.") if ok else st.error(msg)
-                        except Exception:
-                            st.error("We could not create your account database record. Please try again shortly.")
+                        st.error(message)
 
-    with col_r:
+    with right:
         st.markdown("### Plans")
         ui.plan_cards_auth()
 
-# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # HOME
-# ─────────────────────────────────────────────────────────────────
-def page_home(user):
-    plan = PLANS[user["plan"]]
-    name = (user.get("name","") or "there").split()[0]
-    ui.hero(f"Welcome back, {name} {plan['badge']}",
-            "Your AI workspace — create, train, and share")
+# ─────────────────────────────────────────────────────────────────────
+def page_home(user: dict) -> None:
+    stats = core.usage(user)
+    plan = stats["plan"]
+    first_name = (user.get("name") or "there").split()[0]
+    ui.hero(f"Welcome back, {first_name} {plan['badge']}",
+            "Your AI workspace — create, train and share")
 
-    c1, c2, c3, c4 = st.columns(4)
-    for col, num, lbl in [
-        (c1, user.get("tokens",0),           "🪙 Tokens"),
-        (c2, len(user.get("datasets",[])),    "📦 Datasets"),
-        (c3, len(user.get("models",[])),      "🤖 Models"),
-        (c4, len(user.get("api_keys",{})),    "🔑 API Keys"),
-    ]:
-        col.markdown(f"""
-<div class="card" style="text-align:center;padding:1.3rem">
-  <div class="stat-num">{num:,}</div>
-  <div class="stat-lbl">{lbl}</div>
-</div>""", unsafe_allow_html=True)
+    columns = st.columns(4)
+    tiles = [
+        (stats["tokens"], "🪙 Tokens"),
+        (stats["datasets"], "📦 Datasets"),
+        (stats["models"], "🤖 Models"),
+        (stats["api_keys"], "🔑 API Keys"),
+    ]
+    for column, (value, label) in zip(columns, tiles):
+        column.markdown(ui.stat(value, label), unsafe_allow_html=True)
 
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    cl, cr = st.columns(2, gap="large")
+    ui.divider()
+    left, right = st.columns(2, gap="large")
 
-    with cl:
+    with left:
         st.markdown("**Recent datasets**")
-        my_ds = get_user_datasets(user["email"])
-        if not my_ds:
-            st.markdown('<div class="note">No datasets yet — go to Dataset Chat to make one.</div>',
-                        unsafe_allow_html=True)
-        for ds in reversed(my_ds[-5:]):
-            vis = "🌐" if ds.get("public") else "🔒"
-            st.markdown(f"""
-<div class="hub-card">
-  <h4>{vis} {ds["name"]}</h4>
-  <div class="meta">{len(ds["rows"])} rows · {ds["created"][:10]}</div>
-</div>""", unsafe_allow_html=True)
+        datasets = store.user_datasets(user["email"], with_rows=False)[:5]
+        if not datasets:
+            ui.note("No datasets yet — head to Dataset Chat to build one.")
+        for dataset in datasets:
+            ui.hub_card(dataset["name"], desc=dataset["description"],
+                        stats=f"{dataset['row_count']:,} rows · {dataset['created'][:10]}",
+                        is_public=dataset["public"], tags=dataset["tags"])
 
-    with cr:
+    with right:
         st.markdown("**Recent models**")
-        my_md = get_user_models(user["email"])
-        if not my_md:
-            st.markdown('<div class="note">No models yet — go to My Models to create one.</div>',
-                        unsafe_allow_html=True)
-        for md in reversed(my_md[-5:]):
-            vis = "🌐" if md.get("public") else "🔒"
-            st.markdown(f"""
-<div class="hub-card">
-  <h4>{vis} {md["name"]}</h4>
-  <div class="meta">{md["base_model"]} · {md["created"][:10]}</div>
-</div>""", unsafe_allow_html=True)
+        models = store.user_models(user["email"])[:5]
+        if not models:
+            ui.note("No models yet — create one in My Models.")
+        for model in models:
+            ui.hub_card(model["name"], desc=model["description"],
+                        stats=f"{model['base_model']} · {model['created'][:10]}",
+                        is_public=model["public"], tags=model["tags"])
 
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    ui.divider()
     st.markdown("**Plan usage**")
-    c1, c2, c3 = st.columns(3)
-    ds_lim = plan["max_datasets"]; ds_ct = len(user.get("datasets",[]))
-    md_lim = plan["max_models"];   md_ct = len(user.get("models",[]))
-    tk_lim = plan["monthly_tokens"]; tk_ct = user.get("tokens",0)
-    with c1:
-        st.markdown(f"Datasets: **{ds_ct}** / {ds_lim}")
-        st.progress(min(ds_ct/max(ds_lim,1), 1.0))
-    with c2:
-        st.markdown(f"Models: **{md_ct}** / {md_lim}")
-        st.progress(min(md_ct/max(md_lim,1), 1.0))
-    with c3:
-        st.markdown(f"Tokens: **{tk_ct:,}** / {tk_lim:,}")
-        st.progress(min(tk_ct/max(tk_lim,1), 1.0))
+    usage_columns = st.columns(3)
+    meters = [
+        ("Datasets", stats["datasets"], stats["max_datasets"]),
+        ("Models", stats["models"], stats["max_models"]),
+        ("Tokens", stats["tokens"], stats["max_tokens"]),
+    ]
+    for column, (label, used, limit) in zip(usage_columns, meters):
+        with column:
+            st.markdown(f"{label}: **{used:,}** / {display_limit(limit)}")
+            st.progress(min(used / max(limit, 1), 1.0))
 
     if user["plan"] == "starter":
-        st.markdown('<div class="note" style="margin-top:.6rem">'
-                    '✦ On Starter you get 2 datasets + 2 models. '
-                    'Upgrade to Pro for 6 each, or Elite for unlimited.</div>',
-                    unsafe_allow_html=True)
+        ui.note("Starter includes 2 datasets and 2 models. Pro gives you 6 of each, "
+                "Elite is unlimited.")
 
-# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # DATASET CHAT
-# ─────────────────────────────────────────────────────────────────
-def page_dataset_chat(user):
-    plan = PLANS[user["plan"]]
-    ui.hero("💬 Dataset Chat",
-            "Just describe what you want — the AI builds your dataset like a conversation")
+# ─────────────────────────────────────────────────────────────────────
+QUICK_PROMPTS = [
+    "50 rows of customer reviews for a coffee shop",
+    "100 Q&A pairs about Python programming",
+    "30 rows sentiment dataset about social media posts",
+    "20 instruction-response pairs for a cooking assistant",
+    "40 rows of product descriptions for an electronics store",
+    "60 classification examples of spam vs not-spam emails",
+]
 
-    if _over_limit(user, "datasets"):
-        _limit_warn(user, "datasets")
+
+def _start_dataset(user: dict, message: str, row_count: int) -> None:
+    """Queue up a generation from a natural-language request."""
+    plan = plan_for(user["plan"])
+    row_count = max(1, min(row_count, plan["max_rows"]))
+    columns = inference.suggest_columns(message)
+    st.session_state["pending_dataset"] = {
+        "topic": message, "rows": row_count, "columns": columns,
+        "name": "My Dataset", "description": "", "tags": "",
+    }
+    st.session_state["chat"].append({
+        "role": "bot",
+        "content": (
+            f"Got it — a **{row_count}-row** dataset about:\n\n*{message[:160]}*\n\n"
+            f"Suggested columns: `{', '.join(columns)}`\n\n"
+            "Check the settings below and press **Generate dataset**."
+        ),
+    })
+
+
+def page_dataset_chat(user: dict) -> None:
+    plan = plan_for(user["plan"])
+    ui.hero("💬 Dataset Chat",
+            "Describe what you need — the assistant builds the dataset with you")
+
+    if core.at_limit(user, "datasets"):
+        _limit_warning(user, "datasets")
         return
 
     if "chat" not in st.session_state:
-        first_name = (user.get("name","") or "there").split()[0]
+        first_name = (user.get("name") or "there").split()[0]
         st.session_state["chat"] = [{
             "role": "bot",
             "content": (
-                f"👋 Hi {first_name}! I'm your dataset assistant.\n\n"
-                "Tell me what kind of dataset you need. For example:\n"
+                f"👋 Hi {first_name}! Tell me what dataset you need. For example:\n"
                 "- *50 rows of customer reviews for a coffee shop*\n"
-                "- *Q&A pairs about Python programming*\n"
-                "- *Sentiment dataset about movie reviews*\n\n"
-                f"You have **{user['tokens']:,} tokens** left (10 tokens per row)."
-            )
+                "- *Q&A pairs about Python programming*\n\n"
+                f"You have **{user['tokens']:,} tokens** "
+                f"({TOKENS_PER_ROW} tokens per row)."
+            ),
         }]
-    if "pending_ds" not in st.session_state:
-        st.session_state["pending_ds"] = None
+    st.session_state.setdefault("pending_dataset", None)
 
-    # ── Render chat bubbles ──
-    chat_html = '<div class="chat-wrap">'
-    for msg in st.session_state["chat"]:
-        sender  = "You" if msg["role"] == "user" else "⚡ Asian AI"
-        content = msg["content"].replace("\n","<br>")
-        bclass  = "user" if msg["role"] == "user" else "bot"
-        chat_html += f'<div class="bubble {bclass}"><div class="sender">{sender}</div>{content}</div>'
-    chat_html += "</div>"
-    st.markdown(chat_html, unsafe_allow_html=True)
+    chat_html = ['<div class="chat-wrap">']
+    for message in st.session_state["chat"]:
+        is_user = message["role"] == "user"
+        sender = "You" if is_user else f"{APP_ICON} Assistant"
+        body = ui.markdown_lite(message["content"])
+        chat_html.append(
+            f'<div class="bubble {"user" if is_user else "bot"}">'
+            f'<div class="sender">{sender}</div>{body}</div>'
+        )
+    chat_html.append("</div>")
+    st.markdown("".join(chat_html), unsafe_allow_html=True)
 
-    # ── Pending dataset form ──
-    if st.session_state["pending_ds"]:
-        info = st.session_state["pending_ds"]
-        st.markdown('<hr class="divider">', unsafe_allow_html=True)
-        st.markdown("### ✦ Ready to generate")
+    if st.session_state["pending_dataset"]:
+        _render_generation_form(user, plan)
 
-        col_l, col_r = st.columns([2,1])
-        with col_l:
-            with st.form("confirm_gen"):
-                ds_name  = st.text_input("Dataset name", value=info.get("name","My Dataset"))
-                ds_desc  = st.text_area("Description", value=info.get("desc",""), height=60)
-                cols_raw = st.text_input("Columns (comma-separated)",
-                                         value=", ".join(info.get("columns",["input","output"])))
-                num_rows = st.slider("Rows to generate", 1, plan["max_rows"],
-                                     min(info.get("rows",10), plan["max_rows"]))
-                style    = st.selectbox("Dataset style", [
-                    "Q&A pairs","tabular","instruction-response",
-                    "classification","sentiment analysis","custom"])
-                tags_raw = st.text_input("Tags", value=info.get("tags",""),
-                                         placeholder="nlp, english")
-                public   = st.checkbox("Share publicly on Dataset Hub",
-                                       disabled=not plan["share"],
-                                       help="Pro / Elite only")
-                c1b, c2b = st.columns(2)
-                with c1b: go     = st.form_submit_button("✦ Generate dataset", use_container_width=True)
-                with c2b: cancel = st.form_submit_button("Cancel",            use_container_width=True)
+    if st.session_state.get("last_rows"):
+        with st.expander(f"⬇ Download — {st.session_state.get('last_name', 'last dataset')}"):
+            st.dataframe(pd.DataFrame(st.session_state["last_rows"]),
+                         use_container_width=True)
+            _download_buttons(st.session_state.get("last_id", "dataset"),
+                              st.session_state["last_rows"], key_prefix="last")
 
-            if cancel:
-                st.session_state["pending_ds"] = None
-                st.rerun()
-
-            if go:
-                columns = [c.strip() for c in cols_raw.split(",") if c.strip()]
-                tags    = [t.strip() for t in tags_raw.split(",") if t.strip()]
-                cost    = num_rows * 10
-                topic   = info.get("topic", ds_name)
-
-                if not columns:
-                    st.error("At least one column required.")
-                elif not rate_limit(user["email"], "generate", 3):
-                    st.error("Rate limit: max 3 generations/minute.")
-                elif user["tokens"] < cost:
-                    st.error(f"Need {cost:,} tokens, you have {user['tokens']:,}.")
-                else:
-                    prog = st.progress(0, "Starting…")
-                    def cb(i, n): prog.progress((i+1)/n, f"Row {i+1} of {n}…")
-                    rows = inference.generate_rows(topic, columns, style, num_rows, cb)
-                    prog.empty()
-
-                    if deduct_tokens(user, cost):
-                        try:
-                            with st.status("Saving securely…", expanded=False) as storage_status:
-                                storage_status.update(label="Uploading dataset to secure storage…")
-                                did = save_dataset(user["email"], ds_name, ds_desc,
-                                                   rows, public, tags)
-                                storage_status.update(label="Dataset saved", state="complete")
-                        except (PlanLimitError, StorageUnavailableError) as exc:
-                            user["tokens"] += cost
-                            st.error(str(exc))
-                        else:
-                            save_user(user)
-                            st.session_state["pending_ds"]   = None
-                            st.session_state["last_ds"]      = rows
-                            st.session_state["last_ds_id"]   = did
-                            st.session_state["last_ds_name"] = ds_name
-                            st.session_state["chat"].append({
-                                "role": "bot",
-                                "content": (
-                                    f"✅ Done! **{ds_name}** with {num_rows} rows saved to your account.\n\n"
-                                    f"Used {cost:,} tokens — {user['tokens']:,} left.\n\n"
-                                    "Download it below, or find it in the Dataset Hub."
-                                )
-                            })
-                            st.rerun()
-
-        with col_r:
-            cost_est = info.get("rows",10) * 10
-            st.markdown(f"""
-<div class="card">
-  <div style="font-size:.72rem;color:var(--txt3);text-transform:uppercase;letter-spacing:.06em">Cost estimate</div>
-  <div style="font-size:1.8rem;font-weight:700;color:var(--txt);margin:.3rem 0 .1rem">
-    {cost_est:,}
-    <span style="font-size:.95rem;font-weight:400;color:var(--txt3)">tokens</span>
-  </div>
-  <div style="font-size:.8rem;color:var(--txt2)">
-    {info.get("rows",10)} rows × 10 tokens<br>
-    Your balance: <b>{user["tokens"]:,}</b>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    # ── Last generated preview ──
-    if st.session_state.get("last_ds"):
-        with st.expander(f"⬇ Download — {st.session_state.get('last_ds_name','Last dataset')}",
-                         expanded=False):
-            st.dataframe(pd.DataFrame(st.session_state["last_ds"]), use_container_width=True)
-            _ds_downloads({"id": st.session_state.get("last_ds_id","out"),
-                           "rows": st.session_state["last_ds"]})
-
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-
-    # ── Message input ──
+    ui.divider()
     with st.form("chat_input", clear_on_submit=True):
-        ci, cb2 = st.columns([5,1])
-        with ci:
-            msg = st.text_input("Message", placeholder="Describe your dataset…",
-                                label_visibility="collapsed")
-        with cb2:
+        message_column, send_column = st.columns([5, 1])
+        with message_column:
+            message = st.text_input("Message", placeholder="Describe your dataset…",
+                                    label_visibility="collapsed")
+        with send_column:
             send = st.form_submit_button("Send →", use_container_width=True)
 
-    if send and msg.strip():
-        user_msg = msg.strip()
-        st.session_state["chat"].append({"role":"user","content":user_msg})
-
-        # Detect row count in message
-        m_rows = re.search(r'\b(\d+)\s*(rows?|samples?|examples?|entries)\b', user_msg, re.I)
-        row_count = int(m_rows.group(1)) if m_rows else None
-        has_info  = len(user_msg) > 12
-
-        if row_count and has_info:
-            row_count = min(row_count, plan["max_rows"])
-            # Guess columns from keywords
-            cols = ["input","output"]
-            low  = user_msg.lower()
-            if any(w in low for w in ["review","sentiment","opinion","feeling"]):
-                cols = ["text","sentiment","score"]
-            elif any(w in low for w in ["q&a","question","answer","faq"]):
-                cols = ["question","answer"]
-            elif any(w in low for w in ["instruct","command","task","assistant"]):
-                cols = ["instruction","response"]
-            elif any(w in low for w in ["classif","label","categor","class"]):
-                cols = ["text","label","confidence"]
-            elif any(w in low for w in ["summar","article","document"]):
-                cols = ["document","summary"]
-
-            st.session_state["pending_ds"] = {
-                "topic":user_msg,"rows":row_count,
-                "columns":cols,"name":"My Dataset","desc":"","tags":"",
-            }
-            bot_reply = (
-                f"Got it! I'll build a **{row_count}-row** dataset about:\n\n"
-                f"*{user_msg[:100]}*\n\n"
-                f"Suggested columns: `{', '.join(cols)}`\n\n"
-                "Review the settings below and hit **Generate dataset** when ready."
-            )
+    if send and message.strip():
+        text = message.strip()[:2000]
+        st.session_state["chat"].append({"role": "user", "content": text})
+        row_count = inference.extract_row_count(text)
+        if row_count and len(text) > 12:
+            _start_dataset(user, text, row_count)
         else:
-            # No row count — chat normally
-            bot_reply = inference.chat_response(
-                user_msg, st.session_state["chat"][:-1])
-            # Nudge user if they have a topic but no row count
-            if has_info and "row" not in bot_reply.lower():
-                bot_reply += "\n\n*Tip: tell me how many rows you want, e.g. \"50 rows\"*"
-
-        st.session_state["chat"].append({"role":"bot","content":bot_reply})
+            reply = inference.chat_response(text, st.session_state["chat"][:-1])
+            if len(text) > 12 and "row" not in reply.lower():
+                reply += '\n\n*Tip: tell me how many rows you want, e.g. "50 rows".*'
+            st.session_state["chat"].append({"role": "bot", "content": reply})
         st.rerun()
 
-    # ── Quick start buttons ──
-    st.markdown("**Quick start:**")
-    prompts = [
-        "50 rows of customer reviews for a coffee shop",
-        "100 Q&A pairs about Python programming",
-        "30 rows sentiment dataset about social media posts",
-        "20 instruction-response pairs for a cooking assistant",
-        "40 rows product descriptions for an electronics store",
-        "60 classification examples of spam vs not-spam emails",
-    ]
-    c1, c2 = st.columns(2)
-    for i, p in enumerate(prompts):
-        with (c1 if i%2==0 else c2):
-            if st.button(f"💡 {p}", key=f"qp_{i}", use_container_width=True):
-                m2 = re.search(r'\b(\d+)\b', p)
-                rc = int(m2.group(1)) if m2 else 20
-                low = p.lower()
-                if "review" in low or "sentiment" in low: cg = ["text","sentiment","score"]
-                elif "q&a" in low or "question" in low:   cg = ["question","answer"]
-                elif "instruct" in low:                    cg = ["instruction","response","category"]
-                elif "classif" in low or "spam" in low:   cg = ["text","label"]
-                elif "product" in low or "description" in low: cg = ["name","description","price","category"]
-                else:                                      cg = ["input","output"]
-                st.session_state["chat"].append({"role":"user","content":p})
-                st.session_state["pending_ds"] = {
-                    "topic":p,"rows":rc,"columns":cg,
-                    "name":"My Dataset","desc":"","tags":"",
-                }
-                st.session_state["chat"].append({
-                    "role":"bot",
-                    "content": (
-                        f"Got it! Building a **{rc}-row** dataset:\n\n*{p}*\n\n"
-                        f"Suggested columns: `{', '.join(cg)}`\n\n"
-                        "Review the form below and hit **Generate dataset**."
-                    )
-                })
+    st.markdown("**Quick start**")
+    left, right = st.columns(2)
+    for index, prompt in enumerate(QUICK_PROMPTS):
+        with left if index % 2 == 0 else right:
+            if st.button(f"💡 {prompt}", key=f"quick_{index}", use_container_width=True):
+                st.session_state["chat"].append({"role": "user", "content": prompt})
+                _start_dataset(user, prompt, inference.extract_row_count(prompt) or 20)
                 st.rerun()
 
-# ─────────────────────────────────────────────────────────────────
-# MY MODELS
-# ─────────────────────────────────────────────────────────────────
-def page_my_models(user):
-    plan = PLANS[user["plan"]]
-    ui.hero("🤖 My Models", "Fine-tune on your data · Host · Share · Run inference")
 
-    if _over_limit(user, "models"):
-        _limit_warn(user, "models")
+def _render_generation_form(user: dict, plan: dict) -> None:
+    info = st.session_state["pending_dataset"]
+    ui.divider()
+    st.markdown("### ✦ Ready to generate")
+
+    left, right = st.columns([2, 1])
+    with left:
+        with st.form("confirm_generation"):
+            name = st.text_input("Dataset name", value=info["name"])
+            description = st.text_area("Description", value=info["description"], height=70)
+            columns_raw = st.text_input("Columns (comma-separated)",
+                                        value=", ".join(info["columns"]))
+            row_count = st.slider("Rows to generate", 1, plan["max_rows"],
+                                  min(info["rows"], plan["max_rows"]))
+            style = st.selectbox("Dataset style", [
+                "Q&A pairs", "tabular", "instruction-response",
+                "classification", "sentiment analysis", "custom",
+            ])
+            tags_raw = st.text_input("Tags", value=info["tags"], placeholder="nlp, english")
+            public = st.checkbox("Share publicly on the Dataset Hub",
+                                 disabled=not plan["share"], help="Pro and Elite only")
+            generate_column, cancel_column = st.columns(2)
+            with generate_column:
+                generate = st.form_submit_button("✦ Generate dataset",
+                                                 use_container_width=True)
+            with cancel_column:
+                cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+        if cancel:
+            st.session_state["pending_dataset"] = None
+            st.rerun()
+
+        if generate:
+            _generate_dataset(user, name, description, columns_raw, row_count,
+                              style, tags_raw, public, info["topic"])
+
+    with right:
+        estimate = core.row_cost(info["rows"])
+        st.markdown(
+            '<div class="card">'
+            '<div class="stat-lbl">Cost estimate</div>'
+            f'<div class="stat-num" style="margin:.3rem 0 .1rem">{estimate:,}'
+            '<span style="font-size:.9rem;font-weight:400;color:var(--txt3)"> tokens</span></div>'
+            f'<div style="font-size:.8rem;color:var(--txt2)">{info["rows"]} rows × '
+            f'{TOKENS_PER_ROW} tokens<br>Your balance: <b>{user["tokens"]:,}</b></div></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
+                      row_count: int, style: str, tags_raw: str, public: bool,
+                      topic: str) -> None:
+    """Generate, charge and save — in that order, so failures never bill."""
+    columns = [c.strip() for c in columns_raw.split(",") if c.strip()]
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    cost = core.row_cost(row_count)
+
+    if not columns:
+        st.error("At least one column is required.")
+        return
+    if len(columns) > 12:
+        st.error("Use 12 columns or fewer.")
+        return
+    if not core.rate_limit(user["email"], "generate"):
+        st.error("Rate limit reached — 3 generations per minute.")
+        return
+    if user["tokens"] < cost:
+        st.error(f"This needs {cost:,} tokens and you have {user['tokens']:,}.")
         return
 
+    progress = st.progress(0.0, "Starting…")
+    try:
+        rows = inference.generate_rows(
+            topic or name, columns, style, row_count,
+            progress_cb=lambda done, total: progress.progress(
+                done / total, f"Generated {done} of {total} rows…"),
+        )
+    except inference.ModelLoadingError as exc:
+        st.warning(f"{exc} No tokens were used.")
+        return
+    except inference.InferenceError as exc:
+        st.error(f"{exc} No tokens were used.")
+        return
+    finally:
+        progress.empty()
+
+    charged, balance = core.spend_tokens(user["email"], cost, "dataset_generation")
+    if not charged:
+        st.error("Your token balance changed while generating. Nothing was charged.")
+        return
+
+    try:
+        with st.status("Saving…", expanded=False) as status:
+            dataset_id = core.create_dataset(user["email"], name, description,
+                                             rows, public, tags)
+            status.update(label="Dataset saved", state="complete")
+    except (core.PlanLimitError, core.StorageUnavailableError, ValueError) as exc:
+        core.refund_tokens(user["email"], cost, "refund:save_failed")
+        st.error(f"{exc} Your {cost:,} tokens were refunded.")
+        return
+
+    st.session_state["pending_dataset"] = None
+    st.session_state["last_rows"] = rows
+    st.session_state["last_id"] = dataset_id
+    st.session_state["last_name"] = name
+    st.session_state["chat"].append({
+        "role": "bot",
+        "content": (
+            f"✅ Done — **{name}** with {len(rows)} rows is saved to your account.\n\n"
+            f"That used {cost:,} tokens; you have {balance:,} left.\n\n"
+            "Download it below, or find it in the Dataset Hub."
+        ),
+    })
+    st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# MY MODELS
+# ─────────────────────────────────────────────────────────────────────
+POPULAR_BASE_MODELS = [
+    "Hwiiiiiiii/gemby-agent-3b",
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "microsoft/phi-2",
+    "google/flan-t5-base",
+    "facebook/opt-1.3b",
+    "EleutherAI/pythia-1b",
+]
+
+
+def page_my_models(user: dict) -> None:
+    plan = plan_for(user["plan"])
+    ui.hero("🤖 My Models", "Fine-tune on your data · Host · Share · Run inference")
+
     tab_new, tab_list = st.tabs(["Create & fine-tune", "My models"])
-
     with tab_new:
-        col_l, col_r = st.columns([3,2], gap="large")
-
-        with col_r:
-            st.markdown("""
-<div class="card">
-  <div style="font-weight:600;color:var(--txt);margin-bottom:.6rem">How it works</div>
-  <div style="font-size:.83rem;color:var(--txt2);line-height:1.8">
-    1. Pick a base model from HuggingFace<br>
-    2. Choose one of your datasets to train on<br>
-    3. Download the auto-generated <b>Colab notebook</b><br>
-    4. Open in Google Colab → <b>T4 GPU (free)</b><br>
-    5. Run all cells → model pushes to HuggingFace<br>
-    6. The platform connects the trained model automatically
-  </div>
-</div>
-<div class="card" style="margin-top:.7rem">
-  <div style="font-size:.73rem;color:var(--txt3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.5rem">Popular base models</div>
-  <div>
-    <span class="tag acc">Hwiiiiiiii/gemby-agent-3b</span>
-    <span class="tag">TinyLlama/TinyLlama-1.1B</span>
-    <span class="tag">microsoft/phi-2</span>
-    <span class="tag">google/flan-t5-base</span>
-    <span class="tag">facebook/opt-1.3b</span>
-    <span class="tag">EleutherAI/pythia-1b</span>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-        with col_l:
-            with st.form("new_model_form"):
-                mname    = st.text_input("Model name", placeholder="My Coffee Classifier")
-                mdesc    = st.text_area("Description", height=65)
-                base     = st.text_input("Base model",
-                                         value="Hwiiiiiiii/gemby-agent-3b")
-                st.caption("Your trained weights are stored securely by the platform. You do not need to manage a storage repository or token.")
-
-                my_ds   = get_user_datasets(user["email"])
-                ds_opts = ["— none (zero-shot) —"] + [d["name"] for d in my_ds]
-                ds_sel  = st.selectbox("Train on dataset", ds_opts)
-
-                with st.expander("⚙️ Training settings"):
-                    epochs = st.slider("Epochs", 1, 10, 3)
-                    lr     = st.select_slider("Learning rate",
-                                              ["5e-5","2e-4","5e-4","1e-3"], value="2e-4")
-                    mlen   = st.select_slider("Max sequence length",
-                                              [128,256,512,1024], value=512)
-                    batch  = st.select_slider("Batch size", [1,2,4,8], value=4)
-
-                tags_raw = st.text_input("Tags", placeholder="nlp, classifier, english")
-                public   = st.checkbox("Share publicly on Model Hub",
-                                       disabled=not plan["share"],
-                                       help="Pro / Elite only")
-                submitted = st.form_submit_button(
-                    "✦ Create model + generate Colab notebook",
-                    use_container_width=True)
-
-            if submitted:
-                if not mname:    st.error("Model name required."); st.stop()
-                if not base:     st.error("Base model required."); st.stop()
-                with st.spinner("Preparing secure model storage…"):
-                    out_repo = make_model_repo(user["email"], mname)
-                if not out_repo:
-                    st.error(storage_diagnostic()); st.stop()
-
-                chosen_rows = []
-                if ds_sel != "— none (zero-shot) —":
-                    for d in my_ds:
-                        if d["name"] == ds_sel:
-                            chosen_rows = d["rows"]; break
-
-                tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-                nb   = inference.generate_colab_notebook(
-                    mname, base, out_repo, chosen_rows,
-                    "", epochs, lr, mlen, batch)
-
-                try:
-                    mid = save_model(user["email"], mname, mdesc, base, out_repo, public, tags)
-                except PlanLimitError as exc:
-                    st.error(str(exc)); st.stop()
-                save_user(user)
-                st.session_state["nb_json"] = nb
-                st.session_state["nb_name"] = mname
-                st.success(f"✅ **{mname}** created! Download your Colab notebook below.")
-                st.rerun()
-
-        if st.session_state.get("nb_json"):
-            st.markdown('<hr class="divider">', unsafe_allow_html=True)
-            st.markdown("### 🧪 Your Colab notebook is ready")
-            st.markdown("""
-<div class="note">
-  <b>Steps:</b>  Download the notebook →
-  open <a href="https://colab.research.google.com" target="_blank" style="color:#7dd3fc">colab.research.google.com</a>
-  → Upload → Runtime → Change runtime type → <b>T4 GPU</b> → Run All.<br>
-  Model trains and is saved automatically by the platform. 100% free GPU!
-</div>""", unsafe_allow_html=True)
-            nb_name = st.session_state.get("nb_name","model").replace(" ","_")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button("⬇ Download Colab notebook (.ipynb)",
-                    st.session_state["nb_json"],
-                    file_name=f"train_{nb_name}.ipynb",
-                    mime="application/json", use_container_width=True)
-            with c2:
-                st.link_button("🔗 Open Google Colab",
-                               "https://colab.research.google.com",
-                               use_container_width=True)
-
+        if core.at_limit(user, "models"):
+            _limit_warning(user, "models")
+        else:
+            _render_model_form(user, plan)
     with tab_list:
-        my_md = get_user_models(user["email"])
-        st.markdown(f'<div style="color:var(--txt3);font-size:.78rem;margin-bottom:.8rem">'
-                    f'{len(my_md)} / {plan["max_models"]} model slots used</div>',
-                    unsafe_allow_html=True)
-        if not my_md:
-            st.markdown('<div class="note">No models yet. Create one above.</div>',
-                        unsafe_allow_html=True)
+        _render_model_list(user, plan)
 
-        for md in reversed(my_md):
-            vis   = "🌐" if md.get("public") else "🔒"
-            thtml = ui.tags_html(md.get("tags",[]), accent=True)
-            st.markdown(f"""
-<div class="hub-card">
-  <h4>{vis} {md["name"]}</h4>
-  <div class="desc">{md.get("description","")}</div>
-  <div class="meta">
-    Base: <code style="color:var(--acc2);font-size:.76rem">{md["base_model"]}</code> ·
-    Platform-managed weights ·
-    {md["created"][:10]}
-  </div>
-  <div style="margin-top:.35rem">{thtml}</div>
-</div>""", unsafe_allow_html=True)
 
-            with st.expander(f"▶ Inference & options — {md['name']}"):
-                c1, c2 = st.columns([3,2])
-                with c1:
-                    prompt  = st.text_area("Try a prompt", height=90, key=f"pr_{md['id']}")
-                    if st.button("▶ Run inference", key=f"run_{md['id']}"):
-                        if not rate_limit(user["email"], "inf", 5):
-                            st.error("Rate limit: 5 calls/minute.")
-                        else:
-                            with st.spinner("Running…"):
-                                out = inference.call_hf(
-                                    md["hf_repo"], prompt)
-                            if out == "__MODEL_LOADING__":
-                                st.warning("Model warming up — try again in 20 seconds.")
-                            elif out.startswith("["):
-                                st.error(out)
-                            else:
-                                st.text_area("Output", out, height=110,
-                                             key=f"op_{md['id']}")
-                with c2:
-                    db  = load_db()
-                    new_pub = st.checkbox("Public", value=md.get("public"),
-                                          key=f"mpub_{md['id']}",
-                                          disabled=not plan["share"])
-                    if st.button("Save visibility", key=f"msv_{md['id']}",
-                                 use_container_width=True):
-                        db["models"][md["id"]]["public"] = new_pub
-                        save_db(db); st.rerun()
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("🗑 Delete model", key=f"mdel_{md['id']}",
-                                 type="secondary", use_container_width=True):
-                        del db["models"][md["id"]]
-                        db["users"][user["email"]]["models"].remove(md["id"])
-                        save_db(db); st.rerun()
+def _render_model_form(user: dict, plan: dict) -> None:
+    left, right = st.columns([3, 2], gap="large")
 
-# ─────────────────────────────────────────────────────────────────
+    with right:
+        st.markdown(
+            '<div class="card"><div style="font-weight:600;margin-bottom:.6rem">How it works</div>'
+            '<div style="font-size:.83rem;color:var(--txt2);line-height:1.85">'
+            "1. Pick a base model from Hugging Face<br>"
+            "2. Choose one of your datasets to train on<br>"
+            "3. Download the generated <b>Colab notebook</b><br>"
+            "4. Open it in Google Colab → <b>T4 GPU (free)</b><br>"
+            "5. Run all cells → weights push to the platform<br>"
+            "6. Your model becomes available for inference"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="card"><div class="stat-lbl" style="margin-bottom:.5rem">'
+            "Popular base models</div><div>"
+            + "".join(ui.tag(m, accent=i == 0) for i, m in enumerate(POPULAR_BASE_MODELS))
+            + "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    with left:
+        datasets = store.user_datasets(user["email"], with_rows=False)
+        options = ["— none (zero-shot) —"] + [f"{d['name']} ({d['row_count']} rows)"
+                                              for d in datasets]
+
+        with st.form("new_model_form"):
+            name = st.text_input("Model name", placeholder="My Coffee Classifier")
+            description = st.text_area("Description", height=70)
+            base_model = st.text_input("Base model", value=POPULAR_BASE_MODELS[0])
+            st.caption("Your trained weights are stored by the platform — you don't "
+                       "need to manage a repository or token.")
+            selection = st.selectbox("Train on dataset", options)
+
+            with st.expander("⚙️ Training settings"):
+                epochs = st.slider("Epochs", 1, 10, 3)
+                learning_rate = st.select_slider(
+                    "Learning rate", ["5e-5", "2e-4", "5e-4", "1e-3"], value="2e-4")
+                max_length = st.select_slider(
+                    "Max sequence length", [128, 256, 512, 1024], value=512)
+                batch_size = st.select_slider("Batch size", [1, 2, 4, 8], value=4)
+
+            tags_raw = st.text_input("Tags", placeholder="nlp, classifier, english")
+            public = st.checkbox("Share publicly on the Model Hub",
+                                 disabled=not plan["share"], help="Pro and Elite only")
+            submitted = st.form_submit_button(
+                "✦ Create model + generate Colab notebook", use_container_width=True)
+
+        if submitted:
+            _create_model(user, name, description, base_model, selection, options,
+                          datasets, tags_raw, public, epochs, learning_rate,
+                          max_length, batch_size)
+
+    if st.session_state.get("notebook_json"):
+        _render_notebook_download()
+
+
+def _create_model(user: dict, name: str, description: str, base_model: str,
+                  selection: str, options: list[str], datasets: list[dict],
+                  tags_raw: str, public: bool, epochs: int, learning_rate: str,
+                  max_length: int, batch_size: int) -> None:
+    if not name.strip():
+        st.error("Model name is required.")
+        return
+    if not base_model.strip():
+        st.error("Base model is required.")
+        return
+
+    rows: list[dict] = []
+    if selection != options[0]:
+        index = options.index(selection) - 1
+        full = store.get_dataset(datasets[index]["id"])
+        rows = full["rows"] if full else []
+
+    with st.spinner("Preparing secure model storage…"):
+        try:
+            import hf_storage
+
+            output_repo = hf_storage.make_model_repo(user["email"], name)
+        except Exception:
+            output_repo = None
+
+    if not output_repo:
+        # Storage is a mirror, not a gate: fall back to a deterministic name so
+        # the notebook is still usable once a token is configured.
+        output_repo = f"asian-inference/{core.normalise_email(user['email']).split('@')[0]}-{name.strip().replace(' ', '-').lower()[:40]}"
+        st.info("Offsite storage isn't configured yet — the notebook will push to "
+                f"`{output_repo}` once you have Hub access.")
+
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    try:
+        core.create_model(user["email"], name, description, base_model,
+                          output_repo, public, tags)
+    except (core.PlanLimitError, ValueError) as exc:
+        st.error(str(exc))
+        return
+
+    st.session_state["notebook_json"] = inference.generate_colab_notebook(
+        name, base_model, output_repo, rows, epochs=epochs, lr=learning_rate,
+        max_length=max_length, batch_size=batch_size,
+    )
+    st.session_state["notebook_name"] = name
+    st.success(f"✅ **{name}** created. Download your Colab notebook below.")
+    st.rerun()
+
+
+def _render_notebook_download() -> None:
+    ui.divider()
+    st.markdown("### 🧪 Your Colab notebook is ready")
+    st.markdown(
+        '<div class="note"><b>Steps:</b> download the notebook → open '
+        '<a href="https://colab.research.google.com" target="_blank" rel="noopener">'
+        "colab.research.google.com</a> → Upload → Runtime → Change runtime type → "
+        "<b>T4 GPU</b> → Run all. The notebook asks for your Hugging Face token when "
+        "it runs; it is never written into the file.</div>",
+        unsafe_allow_html=True,
+    )
+    filename = (st.session_state.get("notebook_name") or "model").replace(" ", "_")
+    left, right = st.columns(2)
+    with left:
+        st.download_button("⬇ Download notebook (.ipynb)",
+                           st.session_state["notebook_json"],
+                           file_name=f"train_{filename}.ipynb",
+                           mime="application/json", use_container_width=True)
+    with right:
+        st.link_button("🔗 Open Google Colab", "https://colab.research.google.com",
+                       use_container_width=True)
+
+
+def _render_model_list(user: dict, plan: dict) -> None:
+    models = store.user_models(user["email"])
+    st.markdown(
+        f'<div class="small">{len(models)} / {display_limit(plan["max_models"])} '
+        "model slots used</div>",
+        unsafe_allow_html=True,
+    )
+    if not models:
+        ui.note("No models yet. Create one in the first tab.")
+        return
+
+    for model in models:
+        ui.hub_card(
+            model["name"], desc=model["description"],
+            stats=f"Base: {model['base_model']} · platform-managed weights · "
+                  f"{model['created'][:10]}",
+            is_public=model["public"], tags=model["tags"],
+        )
+        with st.expander(f"▶ Inference & options — {model['name']}"):
+            left, right = st.columns([3, 2])
+            with left:
+                prompt = st.text_area("Try a prompt", height=90, key=f"prompt_{model['id']}")
+                if st.button("▶ Run inference", key=f"run_{model['id']}"):
+                    _run_inference(model["hf_repo"] or model["base_model"], prompt,
+                                   user["email"], f"out_{model['id']}")
+            with right:
+                public = st.checkbox("Public", value=model["public"],
+                                     key=f"public_{model['id']}",
+                                     disabled=not plan["share"])
+                if st.button("Save visibility", key=f"save_{model['id']}",
+                             use_container_width=True):
+                    ok, message = core.set_model_visibility(model["id"], user["email"], public)
+                    st.toast(message, icon="✅" if ok else "⚠️")
+                    st.rerun()
+                if st.button("🗑 Delete model", key=f"delete_{model['id']}",
+                             type="secondary", use_container_width=True):
+                    ok, message = core.delete_model(model["id"], user["email"])
+                    st.toast(message, icon="✅" if ok else "⚠️")
+                    st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # DATASET HUB
-# ─────────────────────────────────────────────────────────────────
-def page_dataset_hub(user):
-    plan = PLANS[user["plan"]]
+# ─────────────────────────────────────────────────────────────────────
+def _matches(query: str, *fields: object) -> bool:
+    if not query:
+        return True
+    needle = query.lower()
+    return any(needle in str(field).lower() for field in fields)
+
+
+def page_dataset_hub(user: dict) -> None:
+    plan = plan_for(user["plan"])
     ui.hero("📦 Dataset Hub", "Browse · Download · Share community datasets")
 
-    tab_pub, tab_mine = st.tabs(["Community", "My datasets"])
+    tab_public, tab_mine = st.tabs(["Community", "My datasets"])
 
-    with tab_pub:
-        search = st.text_input("🔍 Search", placeholder="name, tag, description…",
-                                key="dh_s", label_visibility="collapsed")
-        all_ds = get_public_datasets()
-        shown  = [d for d in all_ds if not search
-                  or any(search.lower() in str(v).lower()
-                         for v in [d["name"], d.get("description","")]
-                         + d.get("tags",[]))]
-        st.markdown(f'<div style="color:var(--txt3);font-size:.78rem;margin:.2rem 0 .9rem">'
-                    f'{len(shown)} public dataset{"s" if len(shown)!=1 else ""}</div>',
-                    unsafe_allow_html=True)
-        if not shown:
-            st.markdown('<div class="note">No public datasets yet — be first to share one!</div>',
-                        unsafe_allow_html=True)
-        for ds in shown:
-            thtml = ui.tags_html(ds.get("tags",[]))
-            st.markdown(f"""
-<div class="hub-card">
-  <h4>🌐 {ds["name"]}
-    <span style="color:var(--txt3);font-weight:400;font-size:.75rem"> by {ds["owner"]}</span>
-  </h4>
-  <div class="desc">{ds.get("description","No description")}</div>
-  <div class="meta">{len(ds["rows"])} rows · {ds["created"][:10]} · ⬇ {ds.get("downloads",0)}</div>
-  <div style="margin-top:.3rem">{thtml}</div>
-</div>""", unsafe_allow_html=True)
+    with tab_public:
+        query = st.text_input("Search", placeholder="name, tag or description…",
+                              key="hub_search", label_visibility="collapsed")
+        datasets = [
+            d for d in store.public_datasets(with_rows=False)
+            if _matches(query, d["name"], d["description"], " ".join(d["tags"]))
+        ]
+        st.markdown(
+            f'<div class="small">{len(datasets)} public '
+            f'dataset{"" if len(datasets) == 1 else "s"}</div>',
+            unsafe_allow_html=True,
+        )
+        if not datasets:
+            ui.note("No public datasets yet — be the first to share one.")
+        for dataset in datasets:
+            ui.hub_card(
+                dataset["name"], owner=dataset["owner"], desc=dataset["description"],
+                tags=dataset["tags"], is_public=True,
+                stats=f"{dataset['row_count']:,} rows · {dataset['created'][:10]} · "
+                      f"⬇ {dataset['downloads']}",
+            )
             with st.expander("Preview & download"):
-                st.dataframe(pd.DataFrame(ds["rows"]).head(10), use_container_width=True)
-                _ds_downloads(ds)
+                full = store.get_dataset(dataset["id"])
+                rows = full["rows"] if full else []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows).head(10), use_container_width=True)
+                _download_buttons(dataset["id"], rows, key_prefix=f"pub_{dataset['id']}")
 
     with tab_mine:
-        my_ds = get_user_datasets(user["email"])
-        st.markdown(f'<div style="color:var(--txt3);font-size:.78rem;margin:.2rem 0 .9rem">'
-                    f'{len(my_ds)} / {plan["max_datasets"]} slots used</div>',
-                    unsafe_allow_html=True)
-        if not my_ds:
-            st.markdown('<div class="note">No datasets yet. Go to Dataset Chat to make one.</div>',
-                        unsafe_allow_html=True)
-        for ds in reversed(my_ds):
-            vis   = "🌐 Public" if ds.get("public") else "🔒 Private"
-            thtml = ui.tags_html(ds.get("tags",[]))
-            st.markdown(f"""
-<div class="hub-card">
-  <h4>{vis} — {ds["name"]}</h4>
-  <div class="desc">{ds.get("description","")}</div>
-  <div class="meta">{len(ds["rows"])} rows · {ds["created"][:10]}</div>
-  <div style="margin-top:.3rem">{thtml}</div>
-</div>""", unsafe_allow_html=True)
-            with st.expander("Options"):
-                st.dataframe(pd.DataFrame(ds["rows"]).head(5), use_container_width=True)
-                _ds_downloads(ds)
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_pub = st.checkbox("Share publicly", value=ds.get("public"),
-                                          key=f"dpub_{ds['id']}",
-                                          disabled=not plan["share"],
-                                          help="Pro / Elite only")
-                    if st.button("Save", key=f"dsav_{ds['id']}"):
-                        db = load_db()
-                        db["datasets"][ds["id"]]["public"] = new_pub
-                        save_db(db); st.rerun()
-                with c2:
-                    if st.button("🗑 Delete", key=f"ddel_{ds['id']}",
+        datasets = store.user_datasets(user["email"], with_rows=False)
+        st.markdown(
+            f'<div class="small">{len(datasets)} / '
+            f'{display_limit(plan["max_datasets"])} dataset slots used</div>',
+            unsafe_allow_html=True,
+        )
+        if not datasets:
+            ui.note("No datasets yet. Go to Dataset Chat to build one.")
+        for dataset in datasets:
+            ui.hub_card(
+                dataset["name"], desc=dataset["description"], tags=dataset["tags"],
+                is_public=dataset["public"],
+                stats=f"{dataset['row_count']:,} rows · {dataset['created'][:10]} · "
+                      f"stored: {dataset['storage_backend']}",
+            )
+            with st.expander(f"Options — {dataset['name']}"):
+                full = store.get_dataset(dataset["id"])
+                rows = full["rows"] if full else []
+                if rows:
+                    st.dataframe(pd.DataFrame(rows).head(5), use_container_width=True)
+                _download_buttons(dataset["id"], rows, key_prefix=f"own_{dataset['id']}")
+                left, right = st.columns(2)
+                with left:
+                    public = st.checkbox("Share publicly", value=dataset["public"],
+                                         key=f"ds_public_{dataset['id']}",
+                                         disabled=not plan["share"],
+                                         help="Pro and Elite only")
+                    if st.button("Save", key=f"ds_save_{dataset['id']}",
+                                 use_container_width=True):
+                        ok, message = core.set_dataset_visibility(
+                            dataset["id"], user["email"], public)
+                        st.toast(message, icon="✅" if ok else "⚠️")
+                        st.rerun()
+                with right:
+                    if st.button("🗑 Delete", key=f"ds_delete_{dataset['id']}",
                                  type="secondary", use_container_width=True):
-                        db = load_db()
-                        del db["datasets"][ds["id"]]
-                        db["users"][user["email"]]["datasets"].remove(ds["id"])
-                        save_db(db); st.rerun()
+                        ok, message = core.delete_dataset(dataset["id"], user["email"])
+                        st.toast(message, icon="✅" if ok else "⚠️")
+                        st.rerun()
 
-# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # MODEL HUB
-# ─────────────────────────────────────────────────────────────────
-def page_model_hub(user):
-    ui.hero("🌐 Model Hub", "Browse · Try live inference · Download community models")
+# ─────────────────────────────────────────────────────────────────────
+def page_model_hub(user: dict) -> None:
+    ui.hero("🌐 Model Hub", "Browse · Try live inference · Discover community models")
 
-    search = st.text_input("🔍 Search", placeholder="name, base model, tag…",
-                            key="mh_s", label_visibility="collapsed")
-    all_md = get_public_models()
-    shown  = [m for m in all_md if not search
-              or any(search.lower() in str(v).lower()
-                     for v in [m["name"], m.get("base_model",""), m.get("description","")]
-                     + m.get("tags",[]))]
-    st.markdown(f'<div style="color:var(--txt3);font-size:.78rem;margin:.2rem 0 .9rem">'
-                f'{len(shown)} public model{"s" if len(shown)!=1 else ""}</div>',
-                unsafe_allow_html=True)
-    if not shown:
-        st.markdown('<div class="note">No public models yet.</div>', unsafe_allow_html=True)
+    query = st.text_input("Search", placeholder="name, base model or tag…",
+                          key="model_search", label_visibility="collapsed")
+    models = [
+        m for m in store.public_models()
+        if _matches(query, m["name"], m["base_model"], m["description"], " ".join(m["tags"]))
+    ]
+    st.markdown(
+        f'<div class="small">{len(models)} public '
+        f'model{"" if len(models) == 1 else "s"}</div>',
+        unsafe_allow_html=True,
+    )
+    if not models:
+        ui.note("No public models yet.")
 
-    for m in shown:
-        thtml  = ui.tags_html(m.get("tags",[]))
-        st.markdown(f"""
-<div class="hub-card">
-  <h4>🌐 {m["name"]}
-    <span style="color:var(--txt3);font-weight:400;font-size:.75rem"> by {m["owner"]}</span>
-  </h4>
-  <div class="desc">{m.get("description","No description")}</div>
-  <div class="meta">
-    Base: <code style="color:var(--acc2);font-size:.76rem">{m["base_model"]}</code> ·
-    Platform-managed weights ·
-    {m["created"][:10]}
-  </div>
-  <div style="margin-top:.35rem">{thtml}</div>
-</div>""", unsafe_allow_html=True)
-        with st.expander(f"▶ Try inference — {m['name']}"):
-            prompt  = st.text_area("Prompt", height=80, key=f"mhp_{m['id']}")
-            if st.button("Run →", key=f"mhr_{m['id']}"):
-                if not rate_limit(user["email"], "inf", 5):
-                    st.error("Rate limit: 5 calls/minute.")
-                else:
-                    with st.spinner("Running…"):
-                        out = inference.call_hf(m["hf_repo"], prompt)
-                    if out == "__MODEL_LOADING__":
-                        st.warning("Model warming up — wait 20s and retry.")
-                    else:
-                        st.text_area("Output", out, height=100, key=f"mho_{m['id']}")
+    for model in models:
+        ui.hub_card(
+            model["name"], owner=model["owner"], desc=model["description"],
+            tags=model["tags"], is_public=True,
+            stats=f"Base: {model['base_model']} · {model['created'][:10]}",
+        )
+        with st.expander(f"▶ Try inference — {model['name']}"):
+            prompt = st.text_area("Prompt", height=80, key=f"hub_prompt_{model['id']}")
+            if st.button("Run →", key=f"hub_run_{model['id']}"):
+                _run_inference(model["hf_repo"] or model["base_model"], prompt,
+                               user["email"], f"hub_out_{model['id']}")
 
-# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # API KEYS
-# ─────────────────────────────────────────────────────────────────
-def page_api_keys(user):
-    plan = PLANS[user["plan"]]
-    ui.hero("🔑 API Keys", "Your asi- key · Use in Colab · Saves results to your account")
+# ─────────────────────────────────────────────────────────────────────
+def page_api_keys(user: dict) -> None:
+    plan = plan_for(user["plan"])
+    ui.hero("🔑 API Keys", "Your asi- key · use it from Colab, scripts or other apps")
 
-    # ── Platform key ──
-    st.markdown("### Your Asian Inference API key")
-    st.markdown("""
-<div class="note">
-  This is your personal <code>asi-</code> key. Use it anywhere — Google Colab, Python scripts,
-  other apps — to authenticate as <b>you</b> and save datasets or run models directly
-  into your Asian Inference account.
-</div>""", unsafe_allow_html=True)
+    st.markdown(f"### Your {APP_NAME} API key")
+    ui.note("This key authenticates as you. Anyone holding it can use your account, "
+            "so keep it secret and rotate it if it leaks.")
 
-    pkey = user.get("platform_api_key")
-    if not pkey:
-        if st.button("✦ Generate my asi- key", use_container_width=False):
-            user["platform_api_key"] = "asi-" + uuid.uuid4().hex
-            save_user(user)
+    platform_key = user.get("platform_api_key")
+    if not platform_key:
+        if st.button("✦ Generate my asi- key"):
+            core.rotate_platform_key(user["email"])
             st.rerun()
     else:
-        st.markdown(f'<div class="key-box">🔑 {pkey}</div>', unsafe_allow_html=True)
-        st.caption("Keep this secret — anyone with this key can act as you on the platform.")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 Regenerate key", type="secondary"):
-                user["platform_api_key"] = "asi-" + uuid.uuid4().hex
-                save_user(user); st.rerun()
-        with c2:
-            st.download_button("⬇ Save key as .txt", pkey,
-                "asian_inference_key.txt", "text/plain")
+        revealed = st.session_state.get("reveal_key", False)
+        display = platform_key if revealed else core.mask_key(platform_key)
+        st.markdown(f'<div class="key-box">🔑 {esc(display)}</div>', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🙈 Hide" if revealed else "👁 Reveal", use_container_width=True):
+                st.session_state["reveal_key"] = not revealed
+                st.rerun()
+        with col2:
+            if st.button("🔄 Regenerate", type="secondary", use_container_width=True):
+                core.rotate_platform_key(user["email"])
+                st.session_state["reveal_key"] = False
+                st.toast("A new key was generated. The old one no longer works.", icon="✅")
+                st.rerun()
+        with col3:
+            st.download_button("⬇ Save as .txt", platform_key,
+                               "asian_inference_key.txt", "text/plain",
+                               use_container_width=True)
 
-    # ── Colab template ──
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    st.markdown("### Use in Google Colab")
+    ui.divider()
+    st.markdown("### Use it from Google Colab")
+    # Only inline the real key once the user has chosen to reveal it — otherwise
+    # masking the key box above would be pointless with the key in plain sight.
+    snippet_key = platform_key if st.session_state.get("reveal_key") else None
+    st.code(_colab_snippet(snippet_key), language="python")
+    if platform_key and not snippet_key:
+        st.caption("Reveal your key above to have it filled into this template.")
 
-    key_display = pkey or "asi-your-key-here"
-    st.code(f'''# ⚡ Asian Inference — Colab template
-# Paste your asi- key below and run this cell
+    ui.divider()
+    st.markdown("### Stored third-party keys")
+    used = store.count_user_api_keys(user["email"])
+    st.markdown(
+        f'<div class="note"><b>{used}/{display_limit(plan["api_keys"])}</b> key slots '
+        f'used on your {esc(plan["name"])} plan.</div>',
+        unsafe_allow_html=True,
+    )
 
+    with st.form("add_api_key", clear_on_submit=True):
+        col1, col2, col3 = st.columns([2, 3, 1])
+        with col1:
+            label = st.text_input("Label", placeholder="My Hugging Face token")
+        with col2:
+            value = st.text_input("Key value", type="password", placeholder="hf_…")
+        with col3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            add = st.form_submit_button("Add", use_container_width=True)
+    if add:
+        ok, message = core.add_api_key(user, label, value)
+        (st.success if ok else st.error)(message)
+        if ok:
+            st.rerun()
+
+    for entry in store.user_api_keys(user["email"]):
+        ui.hub_card(
+            entry["label"], is_public=False,
+            stats=f"{core.mask_key(entry['key_value'])} · added {entry['created_at'][:10]}",
+        )
+        if st.button(f"Remove '{entry['label']}'", key=f"remove_key_{entry['label']}",
+                     type="secondary"):
+            core.remove_api_key(user, entry["label"])
+            st.rerun()
+
+
+def _colab_snippet(key: str | None) -> str:
+    from config import PUBLIC_URL
+
+    return f'''# ⚡ {APP_NAME} — Colab template
 !pip install -q requests pandas
 
-import requests, json
+import requests
 import pandas as pd
 
-API_KEY  = "{key_display}"
-BASE_URL = "https://asian-inference.streamlit.app"   # your deployed URL
+API_KEY  = "{key or 'asi-your-key-here'}"
+BASE_URL = "{PUBLIC_URL}"
 
-# ── Generate a dataset ──────────────────────────────────────────
+
 def generate_dataset(topic, rows, columns, style="Q&A pairs",
                      name="My Dataset", public=False):
-    r = requests.post(
+    response = requests.post(
         f"{{BASE_URL}}/api/generate",
         headers={{"Authorization": f"Bearer {{API_KEY}}"}},
         json={{
-            "topic":   topic,
-            "rows":    rows,
-            "columns": columns,
-            "style":   style,
-            "name":    name,
-            "public":  public,
+            "topic": topic, "rows": rows, "columns": columns,
+            "style": style, "name": name, "public": public,
         }},
-        timeout=120
+        timeout=120,
     )
-    return r.json()
+    response.raise_for_status()
+    return response.json()
 
-# Example
+
 result = generate_dataset(
-    topic   = "customer reviews for a coffee shop",
-    rows    = 20,
-    columns = ["text", "rating", "sentiment"],
-    style   = "sentiment analysis",
-    name    = "Coffee Reviews Dataset",
+    topic="customer reviews for a coffee shop",
+    rows=20,
+    columns=["text", "rating", "sentiment"],
+    style="sentiment analysis",
+    name="Coffee Reviews",
 )
+display(pd.DataFrame(result.get("rows", [])))
+'''
 
-print(f"Dataset ID : {{result.get('dataset_id')}}")
-print(f"Rows       : {{len(result.get('rows', []))}}")
-print(f"Tokens left: {{result.get('tokens_left')}}")
 
-# Show as DataFrame
-df = pd.DataFrame(result.get("rows", []))
-display(df)
-
-# ── Run inference on a model ────────────────────────────────────
-def run_model(model_id, prompt):
-    r = requests.post(
-        f"{{BASE_URL}}/api/inference",
-        headers={{"Authorization": f"Bearer {{API_KEY}}"}},
-        json={{"model_id": model_id, "prompt": prompt}},
-        timeout=60
-    )
-    return r.json()
-''', language="python")
-
-    # ── External keys ──
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    st.markdown("### External API keys")
-
-    used = len(user.get("api_keys",{}))
-    max_k = plan["api_keys"]
-    st.markdown(f'<div class="note"><b>{used}/{max_k}</b> key slots used on your '
-                f'{plan["name"]} plan.</div>', unsafe_allow_html=True)
-
-    with st.form("add_ext_key"):
-        c1, c2, c3 = st.columns([2,3,1])
-        with c1: label = st.text_input("Label", placeholder="External service key")
-        with c2: kval  = st.text_input("Key value", type="password", placeholder="hf_xxxx…")
-        with c3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            add = st.form_submit_button("Add", use_container_width=True)
-        if add:
-            if not label: st.error("Label required.")
-            elif not kval: st.error("Key value required.")
-            elif used >= max_k: st.error(f"Limit reached ({max_k}). Upgrade for more.")
-            elif label in user.get("api_keys",{}): st.error("Label already used.")
-            else:
-                user.setdefault("api_keys",{})[label] = {
-                    "key": kval, "created": datetime.utcnow().isoformat(), "uses": 0}
-                save_user(user); st.rerun()
-
-    for label, info in user.get("api_keys",{}).items():
-        k = info["key"]
-        masked = k[:8] + "••••••••" + k[-4:]
-        st.markdown(f"""
-<div class="hub-card">
-  <h4>🔑 {label}</h4>
-  <div class="meta">
-    <code style="color:var(--acc2)">{masked}</code> · added {info["created"][:10]}
-  </div>
-</div>""", unsafe_allow_html=True)
-        if st.button(f"Remove '{label}'", key=f"rk_{label}", type="secondary"):
-            revoke_api_key(user, label); st.rerun()
-
-# ─────────────────────────────────────────────────────────────────
-# UPGRADE  (working buttons)
-# ─────────────────────────────────────────────────────────────────
-def page_upgrade(user):
-    ui.hero("⚡ Upgrade", "More tokens · More models · More datasets")
-
+# ─────────────────────────────────────────────────────────────────────
+# UPGRADE
+# ─────────────────────────────────────────────────────────────────────
+def page_upgrade(user: dict) -> None:
+    ui.hero("⚡ Upgrade", "More tokens · more models · more datasets")
     current = user["plan"]
 
-    # ── Plan cards ──
-    c1, c2, c3 = st.columns(3, gap="medium")
-    for col, (pid, p) in zip([c1,c2,c3], PLANS.items()):
-        is_cur  = pid == current
-        popular = pid == "pro"
-        price   = "Free" if p["price"]==0 else f"${p['price']}/mo"
-        feats   = [
-            (f"{p['monthly_tokens']:,} tokens/month",          True),
-            (f"Up to {p['max_rows']:,} rows per dataset",      True),
-            (f"{p['max_datasets']} datasets · {p['max_models']} models", True),
-            ("Public sharing on Hub",                          p["share"]),
-            (f"{p['api_keys']} API key{'s' if p['api_keys']!=1 else ''}", True),
-            ("Priority generation queue",                      p["price"] >= 29.99),
-        ]
-        fhtml = "".join(
-            f'<div style="display:flex;gap:.5rem;align-items:flex-start;margin:.4rem 0;'
-            f'font-size:.82rem;color:{"var(--txt2)" if ok else "var(--txt3)"}">'
-            f'<span style="color:{"var(--grn)" if ok else "var(--txt3)"}">{"✓" if ok else "✗"}</span>'
-            f'{feat}</div>'
-            for feat, ok in feats
-        )
-        pop_badge = ('<div style="position:absolute;top:0;right:0;background:var(--acc);'
-                     'color:#fff;font-size:.6rem;font-weight:700;letter-spacing:.08em;'
-                     'padding:.22rem .7rem;border-radius:0 18px 0 12px">POPULAR</div>'
-                     if popular else "")
-        cur_note  = ('<div style="color:var(--grn);font-size:.76rem;margin:.3rem 0 .6rem">'
-                     '✓ Your current plan</div>' if is_cur else "")
-
-        with col:
-            st.markdown(f"""
-<div class="plan-card {'current' if is_cur else ''}"
-     style="position:relative;min-height:340px">
-  {pop_badge}
-  <div style="font-size:1.6rem;margin-bottom:.5rem">{p["badge"]}</div>
-  <div style="font-size:1rem;font-weight:600;color:var(--txt)">{p["name"]}</div>
-  {cur_note}
-  <div style="font-size:1.85rem;font-weight:700;color:var(--txt);line-height:1.15;
-       margin-bottom:.2rem">{price}</div>
-  <div style="font-size:.73rem;color:var(--txt3);margin-bottom:1rem">
-    {"via Traakteer · cancel anytime" if p["price"]>0 else "forever free · no card needed"}
-  </div>
-  {fhtml}
-  <div style="height:1.2rem"></div>
-</div>""", unsafe_allow_html=True)
-
-            # Working buttons rendered by Streamlit (not inside HTML)
-            if is_cur:
-                st.button("✓ Current plan", key=f"btn_cur_{pid}",
+    columns = st.columns(3, gap="medium")
+    for column, (plan_id, plan) in zip(columns, PLANS.items()):
+        is_current = plan_id == current
+        with column:
+            st.markdown(
+                ui.plan_card_html(plan, current=is_current, popular=plan_id == "pro"),
+                unsafe_allow_html=True,
+            )
+            if is_current:
+                st.button("✓ Current plan", key=f"plan_current_{plan_id}",
                           disabled=True, use_container_width=True)
-            elif p["price"] == 0:
-                if st.button("Switch to Free", key=f"btn_free_{pid}",
+            elif plan["price"] == 0:
+                if st.button("Switch to Free", key=f"plan_free_{plan_id}",
                              type="secondary", use_container_width=True):
-                    db = load_db()
-                    db["users"][user["email"]]["plan"] = "starter"
-                    save_db(db); st.rerun()
+                    ok, message = billing.cancel_subscription(user["email"])
+                    if not ok:
+                        core.set_plan(user["email"], "starter")
+                        message = "Your plan is now Starter."
+                    st.toast(message, icon="✅")
+                    st.rerun()
             else:
-                checkout = (f"https://pay.traakteer.com/checkout"
-                            f"?plan={p['traakteer_id']}"
-                            f"&customer_email={user['email']}")
-                st.link_button(f"Upgrade to {p['name']} →",
-                               url=checkout, use_container_width=True)
+                url = billing.checkout_url(user["email"], plan_id)
+                if url:
+                    st.link_button(f"Upgrade to {plan['name']} →", url=url,
+                                   use_container_width=True)
+                else:
+                    st.button(f"Upgrade to {plan['name']}", key=f"plan_na_{plan_id}",
+                              disabled=True, use_container_width=True,
+                              help="Payments are not configured on this deployment.")
 
-    # ── Table ──
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    st.markdown("### Full plan comparison")
-    df = pd.DataFrame({
-        "Feature":            ["Tokens/month","Max rows","Datasets","Models",
-                               "API keys","Public sharing","Priority queue","Price"],
-        "🆓 Starter":        ["500","50","2","2","1","✗","✗","Free"],
-        "⚡ Pro":            ["15,000","2,000","6","6","5","✓","✗","$9.99/mo"],
-        "👑 Elite":          ["Unlimited","50,000","Unlimited","Unlimited",
-                               "Unlimited","✓","✓","$29.99/mo"],
+    ui.divider()
+    st.markdown("### Full comparison")
+    comparison = pd.DataFrame({
+        "Feature": ["Tokens/month", "Max rows per dataset", "Datasets", "Models",
+                    "Stored API keys", "Public sharing", "Priority queue", "Price"],
+        **{
+            f'{plan["badge"]} {plan["name"]}': [
+                f'{plan["monthly_tokens"]:,}',
+                f'{plan["max_rows"]:,}',
+                display_limit(plan["max_datasets"]),
+                display_limit(plan["max_models"]),
+                display_limit(plan["api_keys"]),
+                "✓" if plan["share"] else "✗",
+                "✓" if plan["priority_queue"] else "✗",
+                "Free" if plan["price"] == 0 else f'${plan["price"]}/mo',
+            ]
+            for plan in PLANS.values()
+        },
     })
-    st.dataframe(df.set_index("Feature"), use_container_width=True)
-    st.markdown("""
-<div class="note" style="margin-top:.8rem">
-  Payments processed by <b>Traakteer</b>. After payment, your plan upgrades
-  automatically via a signed webhook — no waiting, no manual steps.
-</div>""", unsafe_allow_html=True)
+    st.dataframe(comparison.set_index("Feature"), use_container_width=True)
 
-# ─────────────────────────────────────────────────────────────────
+    if not (billing.stripe_available() or billing.traakteer_available()):
+        ui.note("Payments are not configured on this deployment, so paid plans cannot "
+                "be purchased yet. An administrator can enable Stripe or Traakteer.",
+                kind="warn")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ACCOUNT
+# ─────────────────────────────────────────────────────────────────────
+def page_account(user: dict) -> None:
+    plan = plan_for(user["plan"])
+    ui.hero("⚙️ Account", "Profile · password · billing history")
+
+    st.markdown(
+        '<div class="card">'
+        f'<div><b>{esc(user["name"] or "—")}</b></div>'
+        f'<div class="small">{esc(user["email"])}</div>'
+        f'<div style="margin-top:.6rem">{plan["badge"]} {esc(plan["name"])} · '
+        f'🪙 {user["tokens"]:,} tokens · member since {user["created"][:10]}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns(2, gap="large")
+
+    with left:
+        st.markdown("### Change password")
+        with st.form("change_password", clear_on_submit=True):
+            current = st.text_input("Current password", type="password")
+            new = st.text_input("New password", type="password")
+            confirm = st.text_input("Confirm new password", type="password")
+            submitted = st.form_submit_button("Update password", use_container_width=True)
+        if submitted:
+            if new != confirm:
+                st.error("The new passwords don't match.")
+            else:
+                ok, message = core.change_password(user["email"], current, new)
+                (st.success if ok else st.error)(message)
+
+    with right:
+        st.markdown("### Subscription")
+        status = billing.subscription_status(user["email"])
+        if status:
+            st.markdown(
+                f'<div class="card"><div class="small">Current plan</div>'
+                f'<div style="font-weight:600;margin:.2rem 0 .6rem">'
+                f'{esc(status["plan_name"])}</div>'
+                f'<div class="small">Subscription: '
+                f'{esc(status["stripe_subscription_id"] or "none on file")}</div></div>',
+                unsafe_allow_html=True,
+            )
+        if user["plan"] != "starter":
+            if st.button("Cancel subscription", type="secondary",
+                         use_container_width=True):
+                ok, message = billing.cancel_subscription(user["email"])
+                st.toast(message, icon="✅" if ok else "⚠️")
+                st.rerun()
+
+    ui.divider()
+    st.markdown("### Token history")
+    history = store.token_history(user["email"], limit=50)
+    if history:
+        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+    else:
+        ui.note("No token activity yet.")
+
+    events = billing.billing_history(user["email"], limit=25)
+    if events:
+        st.markdown("### Billing history")
+        st.dataframe(
+            pd.DataFrame([{"date": e["created_at"][:19], "event": e["event_type"]}
+                          for e in events]),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # SUPPORT
-# ─────────────────────────────────────────────────────────────────
-def page_support(user):
+# ─────────────────────────────────────────────────────────────────────
+FAQS = [
+    ("How do tokens work?",
+     f"Each generated dataset row costs {TOKENS_PER_ROW} tokens. Tokens are only "
+     "charged after rows are generated successfully, and are refunded if saving "
+     "fails. Allowances reset monthly and do not roll over."),
+    ("How do I use my asi- key in Colab?",
+     "Go to API Keys, generate your key, then copy the Colab template shown on that "
+     "page and paste your key into it."),
+    ("Why did generation fail?",
+     "Usually the model is cold-starting on the free tier. Wait 20–30 seconds and try "
+     "again — no tokens are charged for a failed generation."),
+    ("How do I train my own model?",
+     "My Models → Create & fine-tune. Fill in the form, download the Colab notebook, "
+     "open it in Google Colab, pick the free T4 GPU and run all cells. The notebook "
+     "asks for your Hugging Face token at runtime."),
+    ("Can other people see my datasets and models?",
+     "Only if you mark them public. Starter is private-only; Pro and Elite can publish "
+     "to the community Hub."),
+    ("Where is my data stored?",
+     "In the platform database. When offsite storage is configured, dataset rows are "
+     "also mirrored to a private Hugging Face repository owned by the platform."),
+]
+
+
+def page_support(user: dict) -> None:
     ui.hero("💬 Support", "We reply within 24 hours on business days")
 
-    tab_t, tab_faq = st.tabs(["Send a ticket", "FAQ"])
+    tab_new, tab_mine, tab_faq = st.tabs(["Send a ticket", "My tickets", "FAQ"])
 
-    with tab_t:
-        with st.form("support_form"):
+    with tab_new:
+        with st.form("support_form", clear_on_submit=True):
             subject = st.selectbox("Topic", [
-                "Billing / Traakteer payment",
-                "Tokens or plan issue",
-                "Dataset generation error",
-                "Model training / Colab issue",
-                "API key issue",
-                "Account access",
-                "Feature request",
-                "Other",
+                "Billing or payment", "Tokens or plan issue",
+                "Dataset generation error", "Model training / Colab issue",
+                "API key issue", "Account access", "Feature request", "Other",
             ])
-            message = st.text_area("Message", height=140,
+            message = st.text_area("Message", height=150,
                                    placeholder="Describe your issue in detail…")
-            if st.form_submit_button("Send message →", use_container_width=True):
-                if not message.strip():
-                    st.error("Please write a message.")
-                else:
-                    db = load_db()
-                    db.setdefault("support_tickets",[]).append({
-                        "id":      str(uuid.uuid4())[:8],
-                        "user":    user["email"],
-                        "subject": subject,
-                        "message": message,
-                        "ts":      datetime.utcnow().isoformat(),
-                        "status":  "open",
-                        "admin_reply": "",
-                    })
-                    save_db(db)
-                    st.success("✅ Ticket submitted! We'll reply to your email soon.")
+            submitted = st.form_submit_button("Send message →", use_container_width=True)
+        if submitted:
+            ok, result = core.submit_ticket(user, subject, message)
+            if ok:
+                st.success(f"✅ Ticket `{result}` submitted. We'll reply by email.")
+            else:
+                st.error(result)
+
+    with tab_mine:
+        tickets = store.user_tickets(user["email"])
+        if not tickets:
+            ui.note("You haven't opened any tickets yet.")
+        for ticket in tickets:
+            icon = "✅" if ticket["status"] == "closed" else "🟡"
+            with st.expander(f"{icon} [{ticket['id']}] {ticket['subject']} · "
+                             f"{ticket['created_at'][:10]}"):
+                st.write(ticket["message"])
+                if ticket["admin_reply"]:
+                    st.info(f"Reply: {ticket['admin_reply']}")
 
     with tab_faq:
-        faqs = [
-            ("How do tokens work?",
-             "Each dataset row costs 10 tokens. Tokens reset monthly on your billing date. "
-             "Unused tokens don't roll over."),
-            ("How do I use my asi- key in Colab?",
-             "Go to API Keys → generate your key → copy the Colab template shown there. "
-             "Paste your key into the template and run the cell. Datasets save directly "
-             "to your account."),
-            ("Why did generation fail or return sample data?",
-             "The HuggingFace model may be cold-starting (free tier spins down). "
-             "Wait 20–30 seconds and try again. Tokens are only deducted on success."),
-            ("How does Traakteer billing work?",
-             "Click Upgrade → redirected to Traakteer secure checkout → pay → "
-             "a signed webhook upgrades your account instantly (usually under 5 seconds)."),
-            ("How do I train my own model?",
-             "Go to My Models → Create & fine-tune. Fill in the form, download the Colab "
-             "notebook, open in Google Colab, select T4 GPU (free tier), Run All. "
-             "Done — your model is live on HuggingFace and Asian Inference."),
-            ("Can other people see my datasets/models?",
-             "Only if you toggle them to Public. Starter plan is private-only. "
-             "Pro and Elite can share to the public Hub."),
-        ]
-        for q, a in faqs:
-            with st.expander(q):
-                st.write(a)
+        for question, answer in FAQS:
+            with st.expander(question):
+                st.write(answer)
 
-# ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # ADMIN
-# ─────────────────────────────────────────────────────────────────
-def page_admin():
+# ─────────────────────────────────────────────────────────────────────
+def page_admin(admin: dict) -> None:
     st.markdown('<div class="admin-bar">👑 Admin Panel — full platform control</div>',
                 unsafe_allow_html=True)
 
-    db      = load_db()
-    users   = list(db["users"].values())
-    datasets= list(db["datasets"].values())
-    models  = list(db["models"].values())
-    tickets = db.get("support_tickets",[])
+    if USING_DEFAULT_SECRET:
+        ui.note("This deployment is using the default SECRET_KEY. Set a unique "
+                "SECRET_KEY in Streamlit secrets.", kind="warn")
+    connected, storage_message = core.storage_status()
+    ui.note(storage_message, kind="ok" if connected else "warn")
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    for col, n, l in [
-        (c1, len(users),   "👤 Users"),
-        (c2, len(datasets),"📦 Datasets"),
-        (c3, len(models),  "🤖 Models"),
-        (c4, sum(1 for t in tickets if t.get("status")=="open"), "🎫 Tickets"),
-        (c5, sum(1 for u in users if u.get("flagged")), "🚩 Flagged"),
-    ]:
-        col.markdown(f"""
-<div class="card" style="text-align:center;padding:1rem">
-  <div class="stat-num">{n}</div>
-  <div class="stat-lbl">{l}</div>
-</div>""", unsafe_allow_html=True)
+    users = store.list_users()
+    datasets = store.all_datasets()
+    models = store.all_models()
+
+    tiles = [
+        (len(users), "👤 Users"),
+        (len(datasets), "📦 Datasets"),
+        (len(models), "🤖 Models"),
+        (store.count_open_tickets(), "🎫 Open tickets"),
+        (sum(1 for u in users if u["flagged"]), "🚩 Flagged"),
+    ]
+    for column, (value, label) in zip(st.columns(5), tiles):
+        column.markdown(ui.stat(value, label), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    t1,t2,t3,t4,t5 = st.tabs(
-        ["👤 Users","📦 Datasets","🤖 Models","🎫 Tickets","🪙 Tokens"])
+    tab_users, tab_datasets, tab_models, tab_tickets, tab_tokens = st.tabs(
+        ["👤 Users", "📦 Datasets", "🤖 Models", "🎫 Tickets", "🪙 Tokens"])
 
-    with t1:
-        srch = st.text_input("Filter email", key="a_us")
-        shown = [u for u in users if srch.lower() in u["email"]] if srch else users
-        for u in shown:
-            flg = " 🚩" if u.get("flagged") else ""
-            with st.expander(f"{u['email']}  ·  {PLANS[u['plan']]['badge']} {u['plan']}  ·  🪙{u['tokens']:,}{flg}"):
-                c1,c2,c3 = st.columns(3)
-                with c1:
-                    np = st.selectbox("Plan", list(PLANS.keys()),
-                        index=list(PLANS.keys()).index(u["plan"]), key=f"apl_{u['email']}")
-                    if st.button("Apply plan", key=f"aap_{u['email']}", use_container_width=True):
-                        u["plan"]=np; save_user(u); st.rerun()
-                with c2:
-                    if u.get("flagged"):
-                        if st.button("✅ Unflag", key=f"auf_{u['email']}", use_container_width=True):
-                            u["flagged"]=False; u["flag_reason"]=""; save_user(u); st.rerun()
+    with tab_users:
+        query = st.text_input("Filter by email", key="admin_user_filter")
+        shown = [u for u in users if not query or query.lower() in u["email"]]
+        for user in shown:
+            flag = " 🚩" if user["flagged"] else ""
+            plan = plan_for(user["plan"])
+            with st.expander(f"{user['email']} · {plan['badge']} {plan['name']} · "
+                             f"🪙{user['tokens']:,}{flag}"):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    plan_ids = list(PLANS)
+                    new_plan = st.selectbox(
+                        "Plan", plan_ids, index=plan_ids.index(user["plan"])
+                        if user["plan"] in plan_ids else 0,
+                        key=f"admin_plan_{user['email']}")
+                    if st.button("Apply plan", key=f"admin_apply_{user['email']}",
+                                 use_container_width=True):
+                        core.set_plan(user["email"], new_plan)
+                        st.rerun()
+                with col2:
+                    if user["flagged"]:
+                        if st.button("✅ Unflag", key=f"admin_unflag_{user['email']}",
+                                     use_container_width=True):
+                            store.update_user(user["email"], flagged=False, flag_reason="")
+                            st.rerun()
                     else:
-                        fr = st.text_input("Flag reason", key=f"afr_{u['email']}")
-                        if st.button("🚩 Flag & suspend", key=f"afg_{u['email']}", use_container_width=True):
-                            u["flagged"]=True; u["flag_reason"]=fr or "Admin action"; save_user(u); st.rerun()
-                with c3:
-                    if st.button("🗑 Delete account", key=f"adl_{u['email']}",
+                        reason = st.text_input("Flag reason",
+                                               key=f"admin_reason_{user['email']}")
+                        if st.button("🚩 Flag & suspend",
+                                     key=f"admin_flag_{user['email']}",
+                                     use_container_width=True):
+                            store.update_user(user["email"], flagged=True,
+                                              flag_reason=reason or "Admin action")
+                            st.rerun()
+                with col3:
+                    if user["email"] == admin["email"]:
+                        st.caption("You cannot delete your own admin account.")
+                    elif st.button("🗑 Delete account",
+                                   key=f"admin_delete_{user['email']}",
+                                   type="secondary", use_container_width=True):
+                        store.delete_user(user["email"])
+                        st.rerun()
+
+                history = store.token_history(user["email"], limit=25)
+                if history:
+                    st.dataframe(pd.DataFrame(history), use_container_width=True,
+                                 hide_index=True)
+
+    with tab_datasets:
+        for dataset in datasets:
+            visibility = "🌐" if dataset["public"] else "🔒"
+            with st.expander(f"{visibility} {dataset['name']} · {dataset['owner']} · "
+                             f"{dataset['row_count']} rows"):
+                public = st.checkbox("Public", value=dataset["public"],
+                                     key=f"admin_ds_public_{dataset['id']}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Save", key=f"admin_ds_save_{dataset['id']}",
+                                 use_container_width=True):
+                        core.set_dataset_visibility(dataset["id"], admin["email"], public)
+                        st.rerun()
+                with col2:
+                    if st.button("🗑 Delete", key=f"admin_ds_delete_{dataset['id']}",
                                  type="secondary", use_container_width=True):
-                        del db["users"][u["email"]]; save_db(db); st.rerun()
-                if u.get("token_log"):
-                    with st.expander("Token log"):
-                        st.dataframe(pd.DataFrame(u["token_log"]), use_container_width=True)
+                        core.delete_dataset(dataset["id"], admin["email"])
+                        st.rerun()
 
-    with t2:
-        for ds in datasets:
-            vis = "🌐" if ds.get("public") else "🔒"
-            with st.expander(f"{vis} {ds['name']}  ·  {ds['owner']}  ·  {len(ds['rows'])} rows"):
-                st.dataframe(pd.DataFrame(ds["rows"]).head(5), use_container_width=True)
-                c1,c2 = st.columns(2)
-                with c1:
-                    pub = st.checkbox("Public", value=ds.get("public"), key=f"adpub_{ds['id']}")
-                    if st.button("Save", key=f"adsv_{ds['id']}"):
-                        db["datasets"][ds["id"]]["public"]=pub; save_db(db); st.rerun()
-                with c2:
-                    if st.button("🗑 Delete", key=f"addd_{ds['id']}", type="secondary"):
-                        del db["datasets"][ds["id"]]; save_db(db); st.rerun()
+    with tab_models:
+        for model in models:
+            visibility = "🌐" if model["public"] else "🔒"
+            with st.expander(f"{visibility} {model['name']} · {model['owner']} · "
+                             f"{model['base_model']}"):
+                public = st.checkbox("Public", value=model["public"],
+                                     key=f"admin_md_public_{model['id']}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Save", key=f"admin_md_save_{model['id']}",
+                                 use_container_width=True):
+                        core.set_model_visibility(model["id"], admin["email"], public)
+                        st.rerun()
+                with col2:
+                    if st.button("🗑 Delete", key=f"admin_md_delete_{model['id']}",
+                                 type="secondary", use_container_width=True):
+                        core.delete_model(model["id"], admin["email"])
+                        st.rerun()
 
-    with t3:
-        for md in models:
-            vis = "🌐" if md.get("public") else "🔒"
-            with st.expander(f"{vis} {md['name']}  ·  {md['owner']}  ·  {md['base_model']}"):
-                c1,c2 = st.columns(2)
-                with c1:
-                    pub = st.checkbox("Public", value=md.get("public"), key=f"admpub_{md['id']}")
-                    if st.button("Save", key=f"admsv_{md['id']}"):
-                        db["models"][md["id"]]["public"]=pub; save_db(db); st.rerun()
-                with c2:
-                    if st.button("🗑 Delete", key=f"admd_{md['id']}", type="secondary"):
-                        del db["models"][md["id"]]; save_db(db); st.rerun()
-
-    with t4:
+    with tab_tickets:
+        tickets = store.list_tickets()
         if not tickets:
             st.info("No tickets yet.")
-        for t in reversed(tickets):
-            icon = "✅" if t["status"]=="closed" else "🟡"
-            with st.expander(f"{icon} [{t['id']}] {t['subject']}  ·  {t['user']}  ·  {t['ts'][:10]}"):
-                st.write(t["message"])
-                if t.get("admin_reply"):
-                    st.info(f"Your reply: {t['admin_reply']}")
-                if t["status"]=="open":
-                    rep = st.text_area("Reply", key=f"arep_{t['id']}")
-                    if st.button("Close ticket", key=f"acls_{t['id']}"):
-                        for tk in db["support_tickets"]:
-                            if tk["id"]==t["id"]:
-                                tk["status"]="closed"; tk["admin_reply"]=rep
-                        save_db(db); st.rerun()
+        for ticket in tickets:
+            icon = "✅" if ticket["status"] == "closed" else "🟡"
+            with st.expander(f"{icon} [{ticket['id']}] {ticket['subject']} · "
+                             f"{ticket['user_email']} · {ticket['created_at'][:10]}"):
+                st.write(ticket["message"])
+                if ticket["admin_reply"]:
+                    st.info(f"Reply sent: {ticket['admin_reply']}")
+                elif ticket["status"] == "open":
+                    reply = st.text_area("Reply", key=f"admin_reply_{ticket['id']}")
+                    if st.button("Close ticket", key=f"admin_close_{ticket['id']}"):
+                        store.close_ticket(ticket["id"], reply)
+                        st.rerun()
 
-    with t5:
-        st.markdown('<div class="warn">All token grants logged. '
-                    'Suspicious activity auto-flags accounts.</div>', unsafe_allow_html=True)
-        with st.form("tok_grant"):
-            tgt = st.selectbox("User", [u["email"] for u in users])
-            amt = st.number_input("Tokens to grant", 0, 100_000, 500)
-            rsn = st.text_input("Reason")
+    with tab_tokens:
+        ui.note("Every grant is logged. More than "
+                f"{core.MANUAL_GRANTS_PER_HOUR_BEFORE_FLAG} manual grants in an hour "
+                "flags the account automatically.", kind="warn")
+        with st.form("grant_tokens"):
+            target = st.selectbox("User", [u["email"] for u in users])
+            amount = st.number_input("Tokens to grant", 0, core.MAX_MANUAL_GRANT, 500)
+            reason = st.text_input("Reason")
             if st.form_submit_button("Grant tokens", use_container_width=True):
-                u = get_user(tgt)
-                if u:
-                    safe_add_tokens(u, int(amt), f"manual:{rsn}")
-                    save_user(u)
-                    st.success(f"✅ Granted {amt:,} to {tgt}.")
-        st.markdown('<hr class="divider">', unsafe_allow_html=True)
-        if st.button("🔄 Reset ALL tokens to plan limits", type="secondary"):
-            for email, u in db["users"].items():
-                u["tokens"] = PLANS[u["plan"]]["monthly_tokens"]
-            save_db(db)
-            st.success("All tokens reset.")
+                balance, flagged = core.grant_tokens(target, int(amount), reason)
+                st.success(f"✅ Granted {amount:,} tokens to {target} "
+                           f"(new balance {balance:,}).")
+                if flagged:
+                    st.warning("That account was flagged for unusual grant activity.")
 
-# ─────────────────────────────────────────────────────────────────
+        ui.divider()
+        if st.button("🔄 Reset all accounts to their plan allowance", type="secondary"):
+            count = core.reset_monthly_tokens()
+            st.success(f"Reset token allowances for {count} account(s).")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # ROUTER
-# ─────────────────────────────────────────────────────────────────
-def main():
-    if "ue" not in st.session_state:
-        page_auth(); return
+# ─────────────────────────────────────────────────────────────────────
+ROUTES = {
+    "🏠  Home": page_home,
+    "💬  Dataset Chat": page_dataset_chat,
+    "🤖  My Models": page_my_models,
+    "📦  Dataset Hub": page_dataset_hub,
+    "🌐  Model Hub": page_model_hub,
+    "🔑  API Keys": page_api_keys,
+    "⚡  Upgrade": page_upgrade,
+    "⚙️  Account": page_account,
+    "💬  Support": page_support,
+}
 
-    user = get_user(st.session_state["ue"])
-    if not user:
-        st.session_state.clear(); st.rerun()
 
-    if user.get("flagged") and user["email"] != ADMIN_EMAIL:
-        st.markdown(f'<div class="warn">🚫 Account suspended: {user.get("flag_reason","")}<br>'
-                    'Contact support to appeal.</div>', unsafe_allow_html=True)
-        if st.button("Sign out"): st.session_state.clear(); st.rerun()
+def main() -> None:
+    email = st.session_state.get(SESSION_EMAIL)
+    if not email:
+        page_auth()
+        return
+
+    user = core.get_user(email)
+    if user is None:
+        # The account disappeared (deleted by an admin) — drop the stale session.
+        st.session_state.clear()
+        st.rerun()
+        return
+
+    if user["flagged"] and not is_admin(user["email"]):
+        st.markdown(
+            f'<div class="warn">🚫 Account suspended: '
+            f'{esc(user["flag_reason"] or "contact support")}<br>'
+            "Reach out to support to appeal.</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Sign out"):
+            st.session_state.clear()
+            st.rerun()
         return
 
     page = ui.sidebar_nav(user)
-    if st.session_state.get("_page"):
-        page = st.session_state.pop("_page")
+    if page == ui.ADMIN_PAGE:
+        # Authorisation is re-derived from the account on every run, never from
+        # a flag written into the session at sign-in.
+        if is_admin(user["email"]):
+            page_admin(user)
+        else:
+            st.error("You do not have access to that page.")
+        return
 
-    if   "Home"         in page: page_home(user)
-    elif "Dataset Chat" in page: page_dataset_chat(user)
-    elif "My Models"    in page: page_my_models(user)
-    elif "Dataset Hub"  in page: page_dataset_hub(user)
-    elif "Model Hub"    in page: page_model_hub(user)
-    elif "API Keys"     in page: page_api_keys(user)
-    elif "Upgrade"      in page: page_upgrade(user)
-    elif "Support"      in page: page_support(user)
-    elif "Admin"        in page and st.session_state.get("ia"): page_admin()
+    ROUTES.get(page, page_home)(user)
+
 
 if __name__ == "__main__":
     main()
