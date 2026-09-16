@@ -1,15 +1,18 @@
 [theme]
 base = "dark"
-backgroundColor = "#080810"
-secondaryBackgroundColor = "#0e0e1c"
-textColor = "#dde1f0"
-primaryColor = "#6d5dfc"
+backgroundColor = "#09090b"
+secondaryBackgroundColor = "#141417"
+textColor = "#f4f4f5"
+primaryColor = "#ff9d3d"
 font = "sans serif"
 
 [server]
 headless = true
-enableCORS = false
+# CORS must stay enabled: with enableCORS=false Streamlit accepts a WebSocket
+# connection from any origin, which XSRF protection does not prevent.
+enableCORS = true
 enableXsrfProtection = true
+maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false

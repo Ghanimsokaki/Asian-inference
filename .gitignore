@@ -1,7 +1,23 @@
+# Secrets — never commit
 .streamlit/secrets.toml
+.env
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
 db.json
+db.json.imported
 rate_limits.json
+
+# Python
 __pycache__/
 *.pyc
-.env
+.pytest_cache/
 venv/
+.venv/
+
+# Editors
+.idea/
+.vscode/
+.DS_Store
