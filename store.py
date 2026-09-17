@@ -777,8 +777,20 @@ def migrate_legacy_json(path: Path | None = None) -> int:
     source = Path(path or LEGACY_DB_JSON)
     if not source.exists():
         return 0
+
+    # Claim the file with an atomic rename *before* reading it. Streamlit runs
+    # every session in its own thread and each one calls bootstrap(); checking
+    # exists() first and renaming last let them all pass the check, all import,
+    # and every loser crash on the final rename with FileNotFoundError — which
+    # took the whole app down at import time.
+    claim = source.with_name(source.name + ".importing")
     try:
-        legacy = json.loads(source.read_text(encoding="utf-8"))
+        source.rename(claim)
+    except OSError:
+        return 0  # another worker claimed it first, or it disappeared
+
+    try:
+        legacy = json.loads(claim.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
 
@@ -854,5 +866,8 @@ def migrate_legacy_json(path: Path | None = None) -> int:
             insert_ticket(str(ticket.get("id", "")), owner,
                           ticket.get("subject", ""), ticket.get("message", ""))
 
-    source.rename(source.with_suffix(".json.imported"))
+    try:
+        claim.replace(source.with_name(source.name + ".imported"))
+    except OSError:
+        pass  # the rows are already in SQLite; the marker is a nicety
     return imported
