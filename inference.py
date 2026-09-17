@@ -239,40 +239,138 @@ def generate_dataset_rows(topic: str, num_rows: int, columns: Sequence[str], sty
 # CHAT
 # ─────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "You are the Asian Inference dataset assistant. You help people design "
-    "synthetic datasets: you suggest columns, row counts and dataset styles. "
-    "Keep replies to two or three short sentences and always steer towards a "
-    "concrete dataset specification."
+    "You are Asian, the assistant built into the Asian Inference platform.\n"
+    "Talk like a knowledgeable, friendly colleague — normal conversation, not a "
+    "form. Answer whatever the person asks: machine learning, datasets, training, "
+    "code, or anything else they are curious about.\n"
+    "You also have one concrete power: you can generate synthetic datasets for "
+    "them. When their question is heading that way, offer it naturally and "
+    "suggest sensible columns — do not force every exchange towards it.\n"
+    "Be concise: two to four sentences unless they ask for depth. Never invent "
+    "facts about their account, and say so plainly when you do not know."
+)
+
+#: Verbs that signal "please build me data", as opposed to merely mentioning data.
+_BUILD_VERBS = (
+    "generate", "create", "make", "build", "produce", "give me", "i need",
+    "i want", "can you make", "can you generate", "synthesi", "mock up", "draft",
+)
+_DATA_NOUNS = (
+    "dataset", "data set", "rows", "samples", "examples", "training data",
+    "test data", "records", "entries", "pairs", "synthetic data",
+)
+_AFFIRMATIVES = (
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please do", "go ahead",
+    "do it", "sounds good", "let's do it", "lets do it", "perfect", "great",
 )
 
 
-def chat_response(message: str, history: Iterable[dict] | None = None) -> str:
-    """Reply to a dataset-design message.
+def detect_dataset_intent(message: str, history: Iterable[dict] | None = None) -> dict | None:
+    """Decide whether the person is asking for a dataset to be built.
 
-    Falls back to a deterministic local reply when no model is reachable, so
-    the chat stays usable on a deployment without an inference token.
+    Returns a spec (``topic``, ``rows``, ``columns``) or None to keep chatting.
+    A bare number is not enough on its own — "I already have 50 rows, now what?"
+    is a question, not a build request — so a build verb or a data noun has to
+    be present too.
     """
+    text = (message or "").strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    row_count = extract_row_count(text)
+    has_verb = any(verb in lowered for verb in _BUILD_VERBS)
+    has_noun = any(noun in lowered for noun in _DATA_NOUNS)
+
+    # "generate 75 customer reviews" states a count with no unit word. A bare
+    # number only counts as a row count once a build verb has established that
+    # they are asking for data, so "a dataset about the 1990s" is not 1990 rows.
+    if row_count is None and has_verb:
+        bare = re.search(r"\b(\d{1,6})\b", text)
+        if bare and 1 <= int(bare.group(1)) <= 100_000:
+            row_count = int(bare.group(1))
+
+    # "yes" / "do it" accepts a build the assistant just offered.
+    if _is_affirmative(lowered):
+        offered = _last_offer(history)
+        if offered:
+            return offered
+
+    if not (has_noun or has_verb):
+        return None
+    # Asking *about* data is not asking *for* data: "I already have 50 rows,
+    # what now?" mentions rows and a count but wants an answer, not a build.
+    if text.rstrip().endswith("?") and not has_verb:
+        return None
+    if has_noun and not has_verb and row_count is None:
+        return None
+    # A verb with no data noun and no count is not about data at all
+    # ("generate ideas for my project").
+    if not has_noun and not row_count:
+        return None
+
+    return {
+        "topic": text,
+        "rows": row_count or 20,
+        "columns": suggest_columns(text),
+    }
+
+
+def looks_data_adjacent(message: str) -> bool:
+    """True when a message is about data the assistant could plausibly generate.
+
+    Used to attach a provisional offer to a reply, so a following "yes" has
+    something concrete to accept.
+    """
+    lowered = (message or "").lower()
+    return any(noun in lowered for noun in _DATA_NOUNS) or bool(extract_row_count(message))
+
+
+def _is_affirmative(lowered: str) -> bool:
+    stripped = lowered.strip(" .!?")
+    return stripped in _AFFIRMATIVES or stripped.startswith(("yes ", "yeah ", "sure "))
+
+
+def _last_offer(history: Iterable[dict] | None) -> dict | None:
+    """Recover the dataset the assistant most recently proposed."""
+    for entry in reversed(list(history or [])):
+        if entry.get("role") == "bot" and entry.get("offer"):
+            return dict(entry["offer"])
+    return None
+
+
+def chat_response(message: str, history: Iterable[dict] | None = None) -> str:
+    """Hold a normal conversation, with dataset generation as one capability."""
     message = (message or "").strip()
     if not message:
-        return "Tell me what kind of dataset you'd like to build."
-
-    transcript = []
-    for entry in list(history or [])[-6:]:
-        speaker = "User" if entry.get("role") == "user" else "Assistant"
-        transcript.append(f"{speaker}: {entry.get('content', '')}")
-    transcript.append(f"User: {message}")
+        return "What would you like to talk about?"
 
     if not config.HF_TOKEN:
         return _offline_reply(message)
 
-    prompt = SYSTEM_PROMPT + "\n\n" + "\n".join(transcript) + "\nAssistant:"
+    transcript = []
+    for entry in list(history or [])[-10:]:
+        speaker = "User" if entry.get("role") == "user" else "Asian"
+        content = str(entry.get("content", "")).strip()
+        if content:
+            transcript.append(f"{speaker}: {content}")
+    transcript.append(f"User: {message}")
+
+    prompt = SYSTEM_PROMPT + "\n\n" + "\n".join(transcript) + "\nAsian:"
     try:
-        reply = call_agent(prompt, max_new=200, temperature=0.7, retries=1)
+        reply = call_agent(prompt, max_new=320, temperature=0.75, retries=1)
     except InferenceError:
         return _offline_reply(message)
 
-    reply = reply.split("User:")[0].strip()
-    return reply or _offline_reply(message)
+    return _clean_reply(reply) or _offline_reply(message)
+
+
+def _clean_reply(reply: str) -> str:
+    """Trim a completion that ran on into the next imagined turn."""
+    for marker in ("\nUser:", "\nAsian:", "User:", "Asian:"):
+        if marker in reply:
+            reply = reply.split(marker)[0]
+    return reply.strip()
 
 
 def suggest_columns(text: str) -> list[str]:
@@ -303,12 +401,78 @@ def extract_row_count(text: str) -> int | None:
     return None
 
 
+#: Platform questions the assistant can answer from its own knowledge, so the
+#: chat stays genuinely useful when no inference model is connected.
+_KNOWN_ANSWERS: list[tuple[tuple[str, ...], str]] = [
+    (("hello", "hi", "hey", "good morning", "good evening", "yo", "sup"),
+     "Hey! I'm Asian, the assistant built into this platform. I can talk through "
+     "dataset design, training and models — and I can generate synthetic datasets "
+     "for you. What are you working on?"),
+    (("who are you", "what are you", "your name", "introduce yourself"),
+     "I'm Asian, the assistant inside Asian Inference. I help you design and "
+     "generate synthetic datasets, then turn them into a fine-tuning notebook you "
+     "can run on a free Colab GPU."),
+    (("what can you do", "help me", "how do you work", "what do you do"),
+     "Three things, mainly: talk through how to structure a dataset, generate one "
+     "row by row from a description, and hand you a Colab notebook that fine-tunes "
+     "a model on it. Describe the data you want and I'll set it up."),
+    (("token", "tokens", "cost", "how much", "price", "pricing", "credit"),
+     "Each generated row costs 10 tokens. You're only charged after rows come back "
+     "successfully, and you're refunded if saving fails. Starter includes 500 "
+     "tokens a month, Pro 15,000, Elite effectively unlimited."),
+    (("train", "training", "fine tune", "finetune", "colab", "gpu"),
+     "Go to My Models, pick a base model and one of your datasets, and you'll get a "
+     "generated .ipynb. Open it in Colab, switch the runtime to the free T4 GPU and "
+     "run all — it LoRA fine-tunes and pushes the weights for you."),
+    (("plan", "plans", "upgrade", "elite", "limit", "limits", "subscription"),
+     "Starter is free with 2 datasets and 2 models. Pro ($9.99) gives you 6 of each "
+     "plus public sharing, and Elite ($29.99) is unlimited. The Upgrade page has the "
+     "full comparison."),
+    (("thank", "thanks", "cheers", "appreciate", "nice one"),
+     "Any time. Tell me what you want to build next."),
+    (("storage", "private", "secure", "where is my data", "is my data"),
+     "Your datasets live in the platform database, private by default. If the admin "
+     "has connected offsite storage they're also mirrored to a private Hugging Face "
+     "repo. Nothing is public unless you switch it on, and that needs Pro or Elite."),
+]
+
+
+def _normalise(text: str) -> str:
+    """Lowercase and strip punctuation so keyword matching is not defeated by '!'."""
+    return " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip() + " "
+
+
+def _mentions(normalised: str, keyword: str) -> bool:
+    """Whole-word containment, so 'pro' does not match inside 'backpropagation'."""
+    return f" {keyword.strip()} " in normalised or normalised.startswith(f" {keyword.strip()} ")
+
+
 def _offline_reply(message: str) -> str:
+    """Answer without a model.
+
+    The platform runs fine with no inference token, so this is a real fallback
+    rather than an error page: it answers what it genuinely knows and is honest
+    about the rest.
+    """
+    normalised = _normalise(message)
+
+    for keywords, answer in _KNOWN_ANSWERS:
+        if any(_mentions(normalised, word) for word in keywords):
+            return answer
+
     columns = ", ".join(suggest_columns(message))
+    if "?" in message:
+        return (
+            "I can't answer that one right now — my language model isn't connected "
+            "on this deployment, so I'm running on built-in answers only.\n\n"
+            "I can still generate datasets. If you describe the data you want, I'll "
+            f"suggest columns (for this I'd start with `{columns}`) and build it."
+        )
+
     return (
-        f"I can build that. Based on your description I'd use the columns `{columns}`.\n\n"
-        "Tell me how many rows you want — for example *\"50 rows\"* — and I'll set up "
-        "the generation form."
+        f"I can build that. For this I'd use the columns `{columns}`.\n\n"
+        "Tell me how many rows you want — *\"50 rows\"* works — and I'll set up the "
+        "generation form."
     )
 
 

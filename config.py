@@ -54,13 +54,30 @@ SECRET_KEY = secret("SECRET_KEY", DEFAULT_SECRET_KEY)
 USING_DEFAULT_SECRET = SECRET_KEY == DEFAULT_SECRET_KEY
 
 # ── External services ────────────────────────────────────────────────
-HF_TOKEN = secret("HF_TOKEN")
+#: Template markers from the shipped secrets example. A token still carrying
+#: one of these is unfilled, and treating it as real means every call spends a
+#: round-trip earning a 401 before falling back.
+_PLACEHOLDER_MARKERS = ("paste", "_here", "xxxx", "your_token", "changeme")
+
+
+def _is_placeholder(value: str) -> bool:
+    lowered = (value or "").lower()
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+
+
+def _real_secret(key: str, fallback: str = "") -> str:
+    """Read a secret, treating an unedited placeholder as absent."""
+    value = secret(key, fallback)
+    return "" if _is_placeholder(value) else value
+
+
+HF_TOKEN = _real_secret("HF_TOKEN")
 DEFAULT_AGENT_REPO = secret("AGENT_REPO", "Hwiiiiiiii/gemby-agent-3b")
 
-TRAAKTEER_SECRET = secret("TRAAKTEER_SECRET")
-STRIPE_SECRET_KEY = secret("STRIPE_SECRET_KEY")
-STRIPE_PUBLISHABLE_KEY = secret("STRIPE_PUBLISHABLE_KEY")
-STRIPE_WEBHOOK_SECRET = secret("STRIPE_WEBHOOK_SECRET")
+TRAAKTEER_SECRET = _real_secret("TRAAKTEER_SECRET")
+STRIPE_SECRET_KEY = _real_secret("STRIPE_SECRET_KEY")
+STRIPE_PUBLISHABLE_KEY = _real_secret("STRIPE_PUBLISHABLE_KEY")
+STRIPE_WEBHOOK_SECRET = _real_secret("STRIPE_WEBHOOK_SECRET")
 
 PUBLIC_URL = secret("PUBLIC_URL", "https://asian-inference.streamlit.app").rstrip("/")
 

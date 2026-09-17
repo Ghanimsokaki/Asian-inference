@@ -71,3 +71,31 @@ def test_go_to_defers_the_page_change(monkeypatch):
     assert ui.NAV_STATE_KEY not in state, (
         "writing the widget key directly raises StreamlitWidgetAlreadyInstantiatedError"
     )
+
+
+def _contrast(foreground: str, background: str) -> float:
+    def luminance(value: str) -> float:
+        value = value.lstrip("#")
+        channels = [int(value[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        channels = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+                    for c in channels]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    high, low = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _token(name: str) -> str:
+    match = re.search(rf"^\s*{name}:\s*(#[0-9a-fA-F]{{6}})", ui.CSS, re.MULTILINE)
+    assert match, f"token {name} not found"
+    return match.group(1)
+
+
+def test_text_tokens_meet_wcag_aa_on_every_surface():
+    """Muted text is the one that silently drifts below 4.5:1."""
+    surfaces = [_token("--bg"), _token("--panel"), _token("--panel2")]
+    for name in ("--txt", "--txt2", "--txt3"):
+        colour = _token(name)
+        for surface in surfaces:
+            ratio = _contrast(colour, surface)
+            assert ratio >= 4.5, f"{name} ({colour}) on {surface} is {ratio:.2f}:1"

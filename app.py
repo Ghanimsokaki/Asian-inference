@@ -124,7 +124,7 @@ def page_auth() -> None:
             with st.form("login_form"):
                 email = st.text_input("Email", placeholder="you@example.com")
                 password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Sign in →", use_container_width=True)
+                submitted = st.form_submit_button("Sign in →", use_container_width=True, type="primary")
             if submitted:
                 ok, message, user = core.login(email, password)
                 if ok and user:
@@ -143,7 +143,7 @@ def page_auth() -> None:
                 )
                 confirm = st.text_input("Confirm password", type="password", key="reg_pw2")
                 submitted = st.form_submit_button(
-                    "Create free account →", use_container_width=True
+                    "Create free account →", use_container_width=True, type="primary"
                 )
             if submitted:
                 if password != confirm:
@@ -224,69 +224,113 @@ def page_home(user: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────
 # DATASET CHAT
 # ─────────────────────────────────────────────────────────────────────
-QUICK_PROMPTS = [
-    "50 rows of customer reviews for a coffee shop",
-    "100 Q&A pairs about Python programming",
-    "30 rows sentiment dataset about social media posts",
-    "20 instruction-response pairs for a cooking assistant",
-    "40 rows of product descriptions for an electronics store",
-    "60 classification examples of spam vs not-spam emails",
+CONVERSATION_STARTERS = [
+    "What makes a good training dataset?",
+    "Generate 50 customer reviews for a coffee shop",
+    "How does LoRA fine-tuning actually work?",
+    "Build 100 Q&A pairs about Python",
+    "How many rows do I need to fine-tune?",
+    "Make 40 spam vs not-spam examples",
 ]
 
 
-def _start_dataset(user: dict, message: str, row_count: int) -> None:
-    """Queue up a generation from a natural-language request."""
+def _greeting(user: dict) -> str:
+    first_name = (user.get("name") or "there").split()[0]
+    return (
+        f"Hi {first_name} — I'm Asian.\n\n"
+        "Ask me anything about machine learning, datasets or training. When you "
+        "want data, just describe it and I'll generate it for you.\n\n"
+        f"You have **{user['tokens']:,} tokens** ({TOKENS_PER_ROW} per row)."
+    )
+
+
+def _provisional_offer(message: str) -> dict | None:
+    """A dataset the assistant could build, so a later 'yes' has something to accept."""
+    if not inference.looks_data_adjacent(message):
+        return None
+    return {
+        "topic": message,
+        "rows": inference.extract_row_count(message) or 20,
+        "columns": inference.suggest_columns(message),
+    }
+
+
+def _queue_generation(user: dict, spec: dict) -> str:
+    """Open the generation form for `spec` and return what the assistant says."""
     plan = plan_for(user["plan"])
-    row_count = max(1, min(row_count, plan["max_rows"]))
-    columns = inference.suggest_columns(message)
+    rows = max(1, min(int(spec.get("rows") or 20), plan["max_rows"]))
+    columns = spec.get("columns") or ["input", "output"]
+    topic = spec.get("topic", "")
+
     st.session_state["pending_dataset"] = {
-        "topic": message, "rows": row_count, "columns": columns,
+        "topic": topic, "rows": rows, "columns": columns,
         "name": "My Dataset", "description": "", "tags": "",
     }
-    st.session_state["chat"].append({
-        "role": "bot",
-        "content": (
-            f"Got it — a **{row_count}-row** dataset about:\n\n*{message[:160]}*\n\n"
-            f"Suggested columns: `{', '.join(columns)}`\n\n"
-            "Check the settings below and press **Generate dataset**."
-        ),
-    })
+    capped = ""
+    if (spec.get("rows") or 0) > plan["max_rows"]:
+        capped = (f"\n\nI capped it at {plan['max_rows']:,} rows — that's the "
+                  f"{plan['name']} plan limit.")
+    return (
+        f"On it — a **{rows}-row** dataset.\n\n"
+        f"I'd use the columns `{', '.join(columns)}`. Adjust anything in the form "
+        f"below, then hit **Generate dataset**.{capped}"
+    )
+
+
+def _take_turn(user: dict) -> None:
+    """Produce the assistant's reply to the last message.
+
+    Runs while the thinking bubble is already on screen, so the wait for the
+    model reads as the assistant composing rather than as the page hanging.
+    """
+    conversation = st.session_state["chat"]
+    message = conversation[-1]["content"]
+    history = conversation[:-1]
+
+    intent = inference.detect_dataset_intent(message, history)
+    if intent:
+        reply, offer = _queue_generation(user, intent), None
+    else:
+        reply = inference.chat_response(message, history)
+        offer = _provisional_offer(message)
+        if offer:
+            reply += "\n\nWant me to build that? Just say the word."
+
+    conversation.append({"role": "bot", "content": reply, "offer": offer})
+    st.session_state["chat_pending"] = False
+    st.rerun()
+
+
+def _send(message: str) -> None:
+    """Record the person's message and hand the turn to the assistant."""
+    st.session_state["chat"].append({"role": "user", "content": message[:2000]})
+    st.session_state["chat_pending"] = True
+    st.rerun()
 
 
 def page_dataset_chat(user: dict) -> None:
     plan = plan_for(user["plan"])
-    ui.hero("💬 Dataset Chat",
-            "Describe what you need — the assistant builds the dataset with you")
+    ui.hero("Dataset Chat", "Talk it through — then let me build the data")
 
     if core.at_limit(user, "datasets"):
         _limit_warning(user, "datasets")
         return
 
     if "chat" not in st.session_state:
-        first_name = (user.get("name") or "there").split()[0]
-        st.session_state["chat"] = [{
-            "role": "bot",
-            "content": (
-                f"👋 Hi {first_name}! Tell me what dataset you need. For example:\n"
-                "- *50 rows of customer reviews for a coffee shop*\n"
-                "- *Q&A pairs about Python programming*\n\n"
-                f"You have **{user['tokens']:,} tokens** "
-                f"({TOKENS_PER_ROW} tokens per row)."
-            ),
-        }]
+        st.session_state["chat"] = [{"role": "bot", "content": _greeting(user)}]
     st.session_state.setdefault("pending_dataset", None)
+    st.session_state.setdefault("chat_pending", False)
 
-    chat_html = ['<div class="chat-wrap">']
-    for message in st.session_state["chat"]:
-        is_user = message["role"] == "user"
-        sender = "You" if is_user else f"{APP_ICON} Assistant"
-        body = ui.markdown_lite(message["content"])
-        chat_html.append(
-            f'<div class="bubble {"user" if is_user else "bot"}">'
-            f'<div class="sender">{sender}</div>{body}</div>'
-        )
-    chat_html.append("</div>")
-    st.markdown("".join(chat_html), unsafe_allow_html=True)
+    pending = st.session_state["chat_pending"]
+    st.markdown(
+        ui.chat_transcript(st.session_state["chat"], user.get("name", ""), pending),
+        unsafe_allow_html=True,
+    )
+
+    # Emitted after the transcript so the thinking bubble is painted first.
+    if pending:
+        _take_turn(user)
+        return
 
     if st.session_state["pending_dataset"]:
         _render_generation_form(user, plan)
@@ -298,36 +342,25 @@ def page_dataset_chat(user: dict) -> None:
             _download_buttons(st.session_state.get("last_id", "dataset"),
                               st.session_state["last_rows"], key_prefix="last")
 
-    ui.divider()
     with st.form("chat_input", clear_on_submit=True):
-        message_column, send_column = st.columns([5, 1])
+        message_column, send_column = st.columns([6, 1])
         with message_column:
-            message = st.text_input("Message", placeholder="Describe your dataset…",
+            message = st.text_input("Message", placeholder="Ask me anything…",
                                     label_visibility="collapsed")
         with send_column:
-            send = st.form_submit_button("Send →", use_container_width=True)
-
+            send = st.form_submit_button("Send", use_container_width=True, type="primary")
     if send and message.strip():
-        text = message.strip()[:2000]
-        st.session_state["chat"].append({"role": "user", "content": text})
-        row_count = inference.extract_row_count(text)
-        if row_count and len(text) > 12:
-            _start_dataset(user, text, row_count)
-        else:
-            reply = inference.chat_response(text, st.session_state["chat"][:-1])
-            if len(text) > 12 and "row" not in reply.lower():
-                reply += '\n\n*Tip: tell me how many rows you want, e.g. "50 rows".*'
-            st.session_state["chat"].append({"role": "bot", "content": reply})
-        st.rerun()
+        _send(message.strip())
 
-    st.markdown("**Quick start**")
-    left, right = st.columns(2)
-    for index, prompt in enumerate(QUICK_PROMPTS):
-        with left if index % 2 == 0 else right:
-            if st.button(f"💡 {prompt}", key=f"quick_{index}", use_container_width=True):
-                st.session_state["chat"].append({"role": "user", "content": prompt})
-                _start_dataset(user, prompt, inference.extract_row_count(prompt) or 20)
-                st.rerun()
+    # Openers are only useful before the conversation has a direction.
+    if len(st.session_state["chat"]) <= 1:
+        st.markdown('<div class="small" style="margin-top:.4rem">Try one of these</div>',
+                    unsafe_allow_html=True)
+        left, right = st.columns(2)
+        for index, prompt in enumerate(CONVERSATION_STARTERS):
+            with left if index % 2 == 0 else right:
+                if st.button(prompt, key=f"starter_{index}", use_container_width=True):
+                    _send(prompt)
 
 
 def _render_generation_form(user: dict, plan: dict) -> None:
@@ -354,7 +387,8 @@ def _render_generation_form(user: dict, plan: dict) -> None:
             generate_column, cancel_column = st.columns(2)
             with generate_column:
                 generate = st.form_submit_button("✦ Generate dataset",
-                                                 use_container_width=True)
+                                                 use_container_width=True,
+                                                 type="primary")
             with cancel_column:
                 cancel = st.form_submit_button("Cancel", use_container_width=True)
 
@@ -522,7 +556,8 @@ def _render_model_form(user: dict, plan: dict) -> None:
             public = st.checkbox("Share publicly on the Model Hub",
                                  disabled=not plan["share"], help="Pro and Elite only")
             submitted = st.form_submit_button(
-                "✦ Create model + generate Colab notebook", use_container_width=True)
+                "✦ Create model + generate Colab notebook", use_container_width=True,
+                type="primary")
 
         if submitted:
             _create_model(user, name, description, base_model, selection, options,
@@ -599,7 +634,8 @@ def _render_notebook_download() -> None:
         st.download_button("⬇ Download notebook (.ipynb)",
                            st.session_state["notebook_json"],
                            file_name=f"train_{filename}.ipynb",
-                           mime="application/json", use_container_width=True)
+                           mime="application/json", use_container_width=True,
+                           type="primary")
     with right:
         st.link_button("🔗 Open Google Colab", "https://colab.research.google.com",
                        use_container_width=True)
@@ -778,7 +814,7 @@ def page_api_keys(user: dict) -> None:
 
     platform_key = user.get("platform_api_key")
     if not platform_key:
-        if st.button("✦ Generate my asi- key"):
+        if st.button("✦ Generate my asi- key", type="primary"):
             core.rotate_platform_key(user["email"])
             st.rerun()
     else:
@@ -915,7 +951,7 @@ def page_upgrade(user: dict) -> None:
                 url = billing.checkout_url(user["email"], plan_id)
                 if url:
                     st.link_button(f"Upgrade to {plan['name']} →", url=url,
-                                   use_container_width=True)
+                                   use_container_width=True, type="primary")
                 else:
                     st.button(f"Upgrade to {plan['name']}", key=f"plan_na_{plan_id}",
                               disabled=True, use_container_width=True,
@@ -972,7 +1008,8 @@ def page_account(user: dict) -> None:
             current = st.text_input("Current password", type="password")
             new = st.text_input("New password", type="password")
             confirm = st.text_input("Confirm new password", type="password")
-            submitted = st.form_submit_button("Update password", use_container_width=True)
+            submitted = st.form_submit_button("Update password", use_container_width=True,
+                                              type="primary")
         if submitted:
             if new != confirm:
                 st.error("The new passwords don't match.")
@@ -1058,7 +1095,8 @@ def page_support(user: dict) -> None:
             ])
             message = st.text_area("Message", height=150,
                                    placeholder="Describe your issue in detail…")
-            submitted = st.form_submit_button("Send message →", use_container_width=True)
+            submitted = st.form_submit_button("Send message →", use_container_width=True,
+                                              type="primary")
         if submitted:
             ok, result = core.submit_ticket(user, subject, message)
             if ok:
@@ -1226,7 +1264,8 @@ def page_admin(admin: dict) -> None:
             target = st.selectbox("User", [u["email"] for u in users])
             amount = st.number_input("Tokens to grant", 0, core.MAX_MANUAL_GRANT, 500)
             reason = st.text_input("Reason")
-            if st.form_submit_button("Grant tokens", use_container_width=True):
+            if st.form_submit_button("Grant tokens", use_container_width=True,
+                                     type="primary"):
                 balance, flagged = core.grant_tokens(target, int(amount), reason)
                 st.success(f"✅ Granted {amount:,} tokens to {target} "
                            f"(new balance {balance:,}).")
