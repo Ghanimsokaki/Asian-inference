@@ -2,8 +2,12 @@
 
 AI dataset generator, model fine-tuner and community hub — like Hugging Face, but yours.
 
-Describe the data you want in a chat, the agent generates it row by row, and the platform
-turns any of your datasets into a ready-to-run Google Colab fine-tuning notebook.
+Chat with an assistant that answers questions about machine learning and generates
+synthetic datasets on request, then turns any of them into a ready-to-run Google
+Colab fine-tuning notebook.
+
+The chat works with no inference token configured — it falls back to built-in
+answers about the platform rather than failing.
 
 ---
 
@@ -11,7 +15,7 @@ turns any of your datasets into a ready-to-run Google Colab fine-tuning notebook
 
 | Feature | Description |
 |---|---|
-| Dataset Chat | Describe your data in plain language; the agent builds it row by row |
+| Dataset Chat | A general assistant: ask it anything about ML, datasets or training — and it generates datasets on request |
 | Model fine-tuner | Pick a base model → get a generated Colab training notebook |
 | Dataset Hub | Browse, preview and download community datasets (CSV / JSON / JSONL) |
 | Model Hub | Browse community models and run live inference |
