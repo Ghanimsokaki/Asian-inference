@@ -79,3 +79,72 @@ def test_legacy_json_is_imported(tmp_path):
 
 def test_migration_is_a_no_op_without_a_file(tmp_path):
     assert store.migrate_legacy_json(tmp_path / "absent.json") == 0
+
+
+def _write_legacy(path, email="old@example.com"):
+    import json
+
+    path.write_text(json.dumps({
+        "users": {
+            email: {
+                "email": email, "name": "Old", "pw_hash": "legacyhash",
+                "plan": "pro", "tokens": 1234, "created": "2025-01-01T00:00:00",
+            }
+        },
+        "datasets": {}, "models": {}, "support_tickets": [],
+    }))
+
+
+def test_concurrent_migrations_do_not_crash(tmp_path):
+    """Production hit FileNotFoundError here.
+
+    Every Streamlit session calls bootstrap() from its own thread. Checking
+    exists() first and renaming last let all of them pass the check and every
+    loser blow up on the rename, killing the app at import time.
+    """
+    import threading
+
+    legacy = tmp_path / "db.json"
+    _write_legacy(legacy)
+
+    results, errors = [], []
+    barrier = threading.Barrier(8)
+
+    def run():
+        barrier.wait()  # maximise the overlap
+        try:
+            results.append(store.migrate_legacy_json(legacy))
+        except Exception as exc:  # noqa: BLE001 - the whole point of the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, f"migration raised under concurrency: {errors}"
+    assert sum(1 for r in results if r > 0) == 1, "exactly one thread should import"
+    assert store.get_user("old@example.com") is not None
+    assert not legacy.exists()
+
+
+def test_bootstrap_survives_a_broken_legacy_file(tmp_path, monkeypatch):
+    import core
+
+    broken = tmp_path / "db.json"
+    broken.write_text("{ this is not json")
+    monkeypatch.setattr(store, "LEGACY_DB_JSON", broken)
+
+    core.bootstrap()  # must not raise
+    assert store.count_users() == 0
+
+
+def test_bootstrap_never_raises(monkeypatch):
+    import core
+
+    def boom(*_a, **_k):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(store, "migrate_legacy_json", boom)
+    core.bootstrap()  # a failed import must not take the app down

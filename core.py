@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 import uuid
@@ -520,6 +521,13 @@ def submit_ticket(user: dict, subject: str, message: str) -> tuple[bool, str]:
 # BOOTSTRAP
 # ─────────────────────────────────────────────────────────────────────
 def bootstrap() -> None:
-    """Prepare the database and import any pre-SQLite data. Idempotent."""
+    """Prepare the database and import any pre-SQLite data. Idempotent.
+
+    Runs on every script execution, so it must never raise: a problem
+    importing old data is worth a log line, not a dead app.
+    """
     store.ensure_db()
-    store.migrate_legacy_json()
+    try:
+        store.migrate_legacy_json()
+    except Exception:
+        logging.getLogger(__name__).exception("Legacy db.json import failed")
