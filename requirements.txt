@@ -1,6 +1,8 @@
 streamlit>=1.35.0
 requests>=2.31.0
 pandas>=2.0.0
+psycopg2-binary>=2.9.0
+supabase>=2.0.0
 
 # Optional — only needed for card payments via Stripe Checkout.
 # The app runs without it and simply hides the Stripe upgrade path.

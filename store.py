@@ -15,7 +15,8 @@ storage. Business rules live in :mod:`core`.
 from __future__ import annotations
 
 import json
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import threading
 import time
 from contextlib import contextmanager
@@ -40,15 +41,43 @@ def utcnow() -> str:
 # ─────────────────────────────────────────────────────────────────────
 # CONNECTION HANDLING
 # ─────────────────────────────────────────────────────────────────────
-def _connect() -> sqlite3.Connection:
-    path = Path(DB_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=30.0, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA synchronous=NORMAL")
+
+def _connect():
+    import config
+    dsn = config.DATABASE_URL
+    if not dsn:
+        raise RuntimeError("DATABASE_URL is not set for Supabase Postgres.")
+    conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.DictCursor)
+    conn.autocommit = True
+    return conn
+
+class PGWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+    
+    def execute(self, sql, params=()):
+        # Convert SQLite ? placeholders to Postgres %s
+        sql = sql.replace("?", "%s")
+        # Handle SQLite specific SQL
+        sql = sql.replace("BEGIN IMMEDIATE", "BEGIN")
+        cur = self.conn.cursor()
+        cur.execute(sql, params)
+        return cur
+        
+    def executescript(self, sql):
+        cur = self.conn.cursor()
+        cur.execute(sql)
+        return cur
+        
+    def close(self):
+        self.conn.close()
+
+def connection():
+    ensure_db()
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        raw_conn = _connect()
+        conn = _local.conn = PGWrapper(raw_conn)
     return conn
 
 
@@ -116,7 +145,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS token_logs (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     user_email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
     delta      INTEGER NOT NULL,
     reason     TEXT NOT NULL DEFAULT '',
@@ -164,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_models_owner  ON models(owner, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_models_public ON models(public, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS api_keys (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     user_email TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
     label      TEXT NOT NULL,
     key_value  TEXT NOT NULL,
@@ -187,7 +216,7 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON support_tickets(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS rate_limits (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id      SERIAL PRIMARY KEY,
     subject TEXT NOT NULL,
     action  TEXT NOT NULL,
     ts      REAL NOT NULL
@@ -195,7 +224,7 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 CREATE INDEX IF NOT EXISTS idx_rate_limits ON rate_limits(subject, action, ts);
 
 CREATE TABLE IF NOT EXISTS billing_events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     user_email TEXT NOT NULL,
     event_type TEXT NOT NULL,
     details    TEXT NOT NULL DEFAULT '{}',
@@ -211,20 +240,18 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
 """
 
 
+
 def ensure_db() -> None:
-    """Create the schema once per process."""
     global _initialised
     if _initialised:
         return
     with _init_lock:
         if _initialised:
             return
-        conn = _connect()
+        raw_conn = _connect()
+        conn = PGWrapper(raw_conn)
         try:
             conn.executescript(_SCHEMA)
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version < SCHEMA_VERSION:
-                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         finally:
             conn.close()
         _initialised = True
@@ -242,7 +269,7 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
-def _user_row(row: sqlite3.Row | None) -> dict | None:
+def _user_row(row: psycopg2.extras.DictRow | None) -> dict | None:
     if row is None:
         return None
     return {
@@ -263,7 +290,7 @@ def _user_row(row: sqlite3.Row | None) -> dict | None:
     }
 
 
-def _dataset_row(row: sqlite3.Row | None, *, with_rows: bool = True) -> dict | None:
+def _dataset_row(row: psycopg2.extras.DictRow | None, *, with_rows: bool = True) -> dict | None:
     if row is None:
         return None
     data = {
@@ -287,7 +314,7 @@ def _dataset_row(row: sqlite3.Row | None, *, with_rows: bool = True) -> dict | N
     return data
 
 
-def _model_row(row: sqlite3.Row | None) -> dict | None:
+def _model_row(row: psycopg2.extras.DictRow | None) -> dict | None:
     if row is None:
         return None
     return {
@@ -327,7 +354,7 @@ def create_user(email: str, name: str, pw_hash: str, plan: str, tokens: int) -> 
                 (email, tokens, tokens, now),
             )
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return False
 
 
@@ -623,7 +650,7 @@ def insert_api_key(email: str, label: str, key_value: str) -> bool:
                 (email, label, key_value, utcnow()),
             )
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return False
 
 
@@ -662,7 +689,7 @@ def insert_ticket(ticket_id: str, email: str, subject: str, message: str) -> boo
                 (ticket_id, email, subject, message, utcnow()),
             )
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return False
 
 
@@ -765,7 +792,7 @@ def mark_webhook_processed(event_id: str, provider: str) -> bool:
                 (event_id, provider, utcnow()),
             )
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.IntegrityError:
         return False
 
 
@@ -822,14 +849,14 @@ def migrate_legacy_json(path: Path | None = None) -> int:
                     )
                 for label, info in (user.get("api_keys") or {}).items():
                     conn.execute(
-                        """INSERT OR IGNORE INTO api_keys
+                        """INSERT INTO api_keys
                            (user_email, label, key_value, uses, last_used, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_email, label) DO NOTHING""",
                         (email, str(label), str(info.get("key", "")),
                          int(info.get("uses", 0)), info.get("last_used"),
                          str(info.get("created") or created)),
                     )
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             continue
         imported += 1
 
@@ -844,7 +871,7 @@ def migrate_legacy_json(path: Path | None = None) -> int:
                 ds.get("storage_backend", "local"), ds.get("storage_repo"),
                 ds.get("storage_path"),
             )
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             continue
 
     for mid, md in (legacy.get("models") or {}).items():
@@ -857,7 +884,7 @@ def migrate_legacy_json(path: Path | None = None) -> int:
                 md.get("base_model", ""), md.get("hf_repo", ""), bool(md.get("public")),
                 md.get("tags") or [], md.get("status", "ready"),
             )
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             continue
 
     for ticket in legacy.get("support_tickets") or []:

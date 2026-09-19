@@ -85,6 +85,9 @@ PUBLIC_URL = secret("PUBLIC_URL", "https://asian-inference.streamlit.app").rstri
 DATA_DIR = Path(secret("DATA_DIR", ".")).expanduser()
 DB_PATH = DATA_DIR / "asian_inference.db"
 LEGACY_DB_JSON = DATA_DIR / "db.json"
+DATABASE_URL = secret("DATABASE_URL", "") # e.g. postgresql://user:password@host:port/db
+SUPABASE_URL = secret("SUPABASE_URL", "")
+SUPABASE_KEY = secret("SUPABASE_KEY", "")
 
 # ── Economics ────────────────────────────────────────────────────────
 TOKENS_PER_ROW = 10
