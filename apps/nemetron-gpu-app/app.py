@@ -1,4 +1,4 @@
-"""Streamlit frontend for the Nemetron + cloud GPU app starter."""
+"""Streamlit frontend for the Nemetron app starter."""
 from __future__ import annotations
 
 import streamlit as st
@@ -10,20 +10,17 @@ from nemotron_client import (
     NemotronRequestError,
     generate_nemotron_reply,
 )
-from settings import secret
 
-APP_NAME = "Nemetron Cloud App"
-DEFAULT_GPU = secret("MODAL_GPU", "T4")
+APP_NAME = "Nemetron App"
 
 st.set_page_config(page_title=APP_NAME, page_icon="🚀", layout="wide")
 
 st.title(f"🚀 {APP_NAME}")
-st.caption("Nemotron via API key, with separate cloud GPU workers for app tasks")
+st.caption("Nemotron via API key with GitHub-ready secret settings")
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 col1.metric("Nemotron model", DEFAULT_MODEL)
-col2.metric("Cloud GPU target", DEFAULT_GPU)
-col3.metric("GitHub OAuth", "configured" if github_oauth_ready() else "not set")
+col2.metric("GitHub OAuth", "configured" if github_oauth_ready() else "not set")
 
 system_prompt = st.text_area(
     "System prompt",
@@ -49,10 +46,4 @@ st.code(
     'GITHUB_CLIENT_SECRET = "..."\n'
     'GITHUB_CALLBACK_URL = "https://your-app.streamlit.app/github/callback"\n',
     language="toml",
-)
-
-st.markdown("### Cloud GPU note")
-st.markdown(
-    "Use `modal_app.py` and `gpu_tasks.py` for your app's GPU workloads. "
-    "Nemotron itself is called through the API client and does not need the GPU worker."
 )

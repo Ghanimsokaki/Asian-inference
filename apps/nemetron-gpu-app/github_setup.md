@@ -1,40 +1,24 @@
-# GitHub setup for the Nemetron Cloud App
+# GitHub setup for the Nemetron App
 
-## Model side
-
-Nemotron is used through API access, not through your Modal GPU.
-
-Set these secrets for the model API:
+Add these in your app secrets or deployment secrets:
 
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_MODEL`
-
-## Cloud GPU side
-
-Use Modal GPU only for your app's GPU workloads.
-
-Add these GitHub secrets:
-
-- `MODAL_TOKEN_ID`
-- `MODAL_TOKEN_SECRET`
-- `MODAL_GPU`
-
-Suggested `MODAL_GPU` values:
-
-- Starter: `T4`
-- Pro: `A10G`
-- Elite: `A100`
-
-## GitHub OAuth app
-
-Add these too if your app connects with GitHub:
-
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `GITHUB_CALLBACK_URL`
 
-## Deploy
+If you use Streamlit Cloud, put them in:
 
-Push to `main` or run the **Deploy Modal Worker** workflow manually.
+- **App Settings**
+- **Secrets**
 
-The deployed Modal worker is for app-side cloud GPU tasks from `modal_app.py` and `gpu_tasks.py`.
+Example:
+
+```toml
+OPENROUTER_API_KEY = "your-openrouter-key"
+OPENROUTER_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct"
+GITHUB_CLIENT_ID = "your-github-client-id"
+GITHUB_CLIENT_SECRET = "your-github-client-secret"
+GITHUB_CALLBACK_URL = "https://your-app.streamlit.app/github/callback"
+```
