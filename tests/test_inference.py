@@ -95,6 +95,41 @@ def test_notebook_caps_embedded_rows():
     assert "500 rows" in "".join(document["cells"][0]["source"])
 
 
+def test_space_app_bundle_includes_apache_license_modal_and_github_files():
+    files = inference.build_space_app_files(
+        "Demo App",
+        "An app starter.",
+        runtime="streamlit",
+        sample_rows=[{"prompt": "hi", "answer": "hello"}],
+        model_label="Tutor Model",
+        plan_id="pro",
+        github_repo="demo/example",
+    )
+    root = "apps/demo-app"
+    assert f"{root}/LICENSE" in files
+    assert "Apache License" in files[f"{root}/LICENSE"]
+    assert f"{root}/app.py" in files
+    assert f"{root}/modal_app.py" in files
+    assert "A10G" in files[f"{root}/modal_app.py"]
+    assert f"{root}/.github/workflows/modal-deploy.yml" in files
+    assert "MODAL_TOKEN_ID" in files[f"{root}/.github/workflows/modal-deploy.yml"]
+
+    notebook = json.loads(inference.generate_kaggle_space_app_notebook("Demo App", "streamlit", files))
+    intro = "".join(notebook["cells"][0]["source"])
+    assert "App Bundle Writer" in intro
+
+
+def test_modal_gpu_mapping_follows_plan():
+    assert inference.modal_gpu_for_plan("starter") == "T4"
+    assert inference.modal_gpu_for_plan("pro") == "A10G"
+    assert inference.modal_gpu_for_plan("elite") == "A100"
+
+
+def test_space_app_runtime_must_be_supported():
+    with pytest.raises(inference.InferenceError, match="Unsupported app runtime"):
+        inference.build_space_app_files("Demo", "Desc", runtime="unknown")
+
+
 def test_suggest_columns():
     assert inference.suggest_columns("customer reviews") == ["text", "sentiment", "score"]
     assert inference.suggest_columns("Q&A about python") == ["question", "answer"]
@@ -110,7 +145,7 @@ def test_extract_row_count():
 def test_chat_falls_back_without_a_token(monkeypatch):
     monkeypatch.setattr(inference.config, "HF_TOKEN", "")
     reply = inference.chat_response("I want movie review data")
-    assert "sentiment" in reply
+    assert "make a dataset" in reply.lower()
 
 
 def test_chat_falls_back_when_inference_fails(monkeypatch):
@@ -125,6 +160,8 @@ def test_model_loading_is_a_distinct_error(monkeypatch):
         status_code = 503
         ok = False
 
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "hf_test")
+    monkeypatch.setattr(inference.config, "MODEL_PROVIDER_TOKEN", "hf_test")
     monkeypatch.setattr(inference.requests, "post", lambda *a, **k: Response())
     monkeypatch.setattr(inference.time, "sleep", lambda *_: None)
 
@@ -137,6 +174,55 @@ def test_http_errors_raise_inference_error(monkeypatch):
         status_code = 404
         ok = False
 
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "hf_test")
+    monkeypatch.setattr(inference.config, "MODEL_PROVIDER_TOKEN", "hf_test")
     monkeypatch.setattr(inference.requests, "post", lambda *a, **k: Response())
     with pytest.raises(inference.InferenceError, match="not found"):
         inference.call_hf("repo/missing", "hello")
+
+
+def test_missing_token_is_reported_before_calling_the_service(monkeypatch):
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "")
+    monkeypatch.setattr(inference.config, "MODEL_PROVIDER_TOKEN", "")
+
+    with pytest.raises(inference.InferenceError, match="not configured"):
+        inference.call_hf("repo/private", "hello")
+
+
+def test_auth_errors_suggest_refreshing_deployment_credentials(monkeypatch):
+    class Response:
+        status_code = 401
+        ok = False
+
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "hf_test")
+    monkeypatch.setattr(inference.config, "MODEL_PROVIDER_TOKEN", "hf_test")
+    monkeypatch.setattr(inference.requests, "post", lambda *a, **k: Response())
+    with pytest.raises(inference.InferenceError, match="deployment model token"):
+        inference.call_hf("repo/private", "hello")
+
+
+def test_auth_errors_can_point_to_a_bad_user_token(monkeypatch):
+    class Response:
+        status_code = 403
+        ok = False
+
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "")
+    monkeypatch.setattr(inference.config, "MODEL_PROVIDER_TOKEN", "")
+    monkeypatch.setattr(inference.requests, "post", lambda *a, **k: Response())
+    with pytest.raises(inference.InferenceError, match="saved model registry token"):
+        inference.call_hf("repo/private", "hello", hf_token="hf_user")
+
+
+def test_chat_can_use_a_user_token_when_the_platform_token_is_missing(monkeypatch):
+    monkeypatch.setattr(inference.config, "HF_TOKEN", "")
+    captured = {}
+
+    def fake_call_agent(_prompt, **kwargs):
+        captured["token"] = kwargs.get("hf_token")
+        return "Hello from the model"
+
+    monkeypatch.setattr(inference, "call_agent", fake_call_agent)
+
+    reply = inference.chat_response("hello", user_hf_token="hf_user")
+    assert reply == "Hello from the model"
+    assert captured["token"] == "hf_user"

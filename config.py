@@ -43,7 +43,7 @@ def secret_bool(key: str, fallback: bool = False) -> bool:
 
 
 # ── Identity & crypto ────────────────────────────────────────────────
-ADMIN_EMAIL = secret("ADMIN_EMAIL", "emir.erningpraja@gmail.com").strip().lower()
+ADMIN_EMAIL = secret("ADMIN_EMAIL", "emir.erningpraja").strip().lower()
 
 DEFAULT_SECRET_KEY = "asian-inference-insecure-development-key"
 SECRET_KEY = secret("SECRET_KEY", DEFAULT_SECRET_KEY)
@@ -71,7 +71,9 @@ def _real_secret(key: str, fallback: str = "") -> str:
     return "" if _is_placeholder(value) else value
 
 
-HF_TOKEN = _real_secret("HF_TOKEN")
+MODEL_PROVIDER_TOKEN = _real_secret("MODEL_PROVIDER_TOKEN") or _real_secret("HF_TOKEN")
+#: Backwards-compatible alias for older deployments and tests.
+HF_TOKEN = MODEL_PROVIDER_TOKEN
 DEFAULT_AGENT_REPO = secret("AGENT_REPO", "Hwiiiiiiii/gemby-agent-3b")
 
 TRAAKTEER_SECRET = _real_secret("TRAAKTEER_SECRET")
@@ -80,6 +82,22 @@ STRIPE_PUBLISHABLE_KEY = _real_secret("STRIPE_PUBLISHABLE_KEY")
 STRIPE_WEBHOOK_SECRET = _real_secret("STRIPE_WEBHOOK_SECRET")
 
 PUBLIC_URL = secret("PUBLIC_URL", "https://asian-inference.streamlit.app").rstrip("/")
+AUTH_COOKIE_NAME = secret("AUTH_COOKIE_NAME", "asian_inference_session").strip() or "asian_inference_session"
+try:
+    AUTH_SESSION_DAYS = max(1, int(secret("AUTH_SESSION_DAYS", "180")))
+except ValueError:
+    AUTH_SESSION_DAYS = 180
+
+# ── Optional Supabase chat memory ────────────────────────────────────
+SUPABASE_URL = secret("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = (
+    _real_secret("SUPABASE_SERVICE_ROLE_KEY")
+    or _real_secret("SUPABASE_ANON_KEY")
+)
+SUPABASE_SCHEMA = secret("SUPABASE_SCHEMA", "public")
+SUPABASE_CHAT_TABLE = secret("SUPABASE_CHAT_TABLE", "chat_memories")
+SUPABASE_APP_PREFIX = secret("SUPABASE_APP_PREFIX", "ai")
+SUPABASE_PRIMARY_BACKEND = secret_bool("SUPABASE_PRIMARY_BACKEND", True)
 
 # ── Storage ──────────────────────────────────────────────────────────
 DATA_DIR = Path(secret("DATA_DIR", ".")).expanduser()
@@ -162,7 +180,17 @@ def plan_for(plan_id: str | None) -> dict[str, Any]:
 
 
 def is_admin(email: str | None) -> bool:
-    return bool(email) and email.strip().lower() == ADMIN_EMAIL
+    if not email:
+        return False
+    candidate = email.strip().lower()
+    target = ADMIN_EMAIL.strip().lower()
+    if not target:
+        return False
+    if candidate == target:
+        return True
+    if "@" not in target:
+        return candidate.split("@", 1)[0] == target
+    return False
 
 
 def display_limit(value: int) -> str:

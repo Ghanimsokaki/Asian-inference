@@ -18,7 +18,7 @@ from typing import Iterable, Optional
 import streamlit as st
 from streamlit.components.v1 import html as st_html
 
-from config import ADMIN_EMAIL, APP_NAME, PLANS, display_limit, plan_for
+from config import APP_NAME, PLANS, display_limit, is_admin, plan_for
 
 # ─────────────────────────────────────────────────────────────────────
 # ESCAPING
@@ -118,8 +118,15 @@ html,body,[class*="css"]{
 a{text-underline-offset:3px}
 [data-testid="stMetricValue"],table td,.tabular{font-variant-numeric:tabular-nums}
 section[data-testid="stSidebar"]{
+  position:relative;
   background:linear-gradient(180deg,#08080a,#0c0c10)!important;
   border-right:1px solid var(--line)!important;
+  overflow:hidden;
+}
+section[data-testid="stSidebar"]::before{
+  content:"";position:absolute;inset:-18% -40% auto auto;width:260px;height:260px;
+  background:radial-gradient(circle,var(--aura-ai),transparent 68%);
+  filter:blur(30px);opacity:.22;pointer-events:none;
 }
 #MainMenu,footer{visibility:hidden}
 
@@ -176,10 +183,13 @@ input:focus,textarea:focus{border-color:var(--acc)!important;outline:none!import
 /* ── Hero ──────────────────────────────────────────────── */
 .hero{
   position:relative;overflow:hidden;padding:1.7rem;margin-bottom:1.1rem;
-  border-radius:18px;border:1px solid var(--line);
+  border-radius:18px;border:1px solid rgba(255,255,255,.08);
   background:
     radial-gradient(120% 140% at 88% -10%,rgba(155,140,255,.16),transparent 55%),
-    linear-gradient(135deg,#0f0f13,#131318);
+    radial-gradient(90% 120% at 0% 0%,rgba(107,220,255,.08),transparent 48%),
+    linear-gradient(135deg,rgba(15,15,19,.92),rgba(19,19,24,.96));
+  box-shadow:var(--shadow-lifted);
+  backdrop-filter:blur(16px);
 }
 /* Solid type carries the emphasis; the aura is light behind it. Gradient text
    costs contrast and the glow does the expressive work better. */
@@ -208,11 +218,22 @@ input:focus,textarea:focus{border-color:var(--acc)!important;outline:none!import
 
 /* ── Surfaces ──────────────────────────────────────────── */
 .card,.hub-card,.plan-card{
-  background:linear-gradient(145deg,var(--panel),#101012);
-  border:1px solid var(--line);border-radius:var(--radius);
+  position:relative;overflow:hidden;
+  background:linear-gradient(145deg,rgba(20,20,23,.94),rgba(16,16,18,.92));
+  border:1px solid rgba(255,255,255,.08);border-radius:var(--radius);
   padding:1rem 1.1rem;margin-bottom:.8rem;
+  box-shadow:var(--shadow);backdrop-filter:blur(14px);
 }
-.hub-card{transition:border-color .18s,transform .18s}
+.card::before,.hub-card::before,.plan-card::before{
+  content:"";position:absolute;inset:0 0 auto 0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);
+  opacity:.8;pointer-events:none;
+}
+.card:hover,.hub-card:hover,.plan-card:hover{
+  border-color:rgba(255,255,255,.14);
+  box-shadow:0 16px 36px rgba(0,0,0,.44),0 0 0 1px rgba(255,255,255,.03);
+}
+.hub-card{transition:border-color .18s,transform .18s,box-shadow .18s}
 .hub-card:hover{border-color:var(--line2);transform:translateY(-2px)}
 .hub-card h4{margin:0 0 .15rem;font-size:1rem;font-weight:600;color:var(--txt)}
 .hub-card .desc{color:var(--txt2);font-size:.88rem;margin:.25rem 0}
@@ -251,6 +272,60 @@ input:focus,textarea:focus{border-color:var(--acc)!important;outline:none!import
   font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:.86rem;
   background:var(--panel2);border:1px dashed var(--line2);border-radius:var(--radius-sm);
   padding:.8rem .95rem;color:var(--acc2);word-break:break-all;
+}
+
+/* ── Diagnostics ───────────────────────────────────────── */
+.diag-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:.85rem;margin:.55rem 0 1rem;
+}
+.diag-card{
+  position:relative;overflow:hidden;
+  background:linear-gradient(160deg,rgba(20,20,23,.96),rgba(13,13,17,.93));
+  border:1px solid rgba(255,255,255,.08);border-radius:16px;
+  padding:1rem 1rem .95rem;min-height:168px;box-shadow:var(--shadow);
+}
+.diag-card::after{
+  content:"";position:absolute;right:-14%;top:-22%;width:120px;height:120px;
+  border-radius:50%;filter:blur(26px);opacity:.22;pointer-events:none;
+}
+.diag-card.ok::after{background:radial-gradient(circle,var(--grn),transparent 68%)}
+.diag-card.warn::after{background:radial-gradient(circle,var(--amber),transparent 68%)}
+.diag-card.off::after{background:radial-gradient(circle,var(--violet),transparent 68%)}
+.diag-top{display:flex;align-items:flex-start;justify-content:space-between;gap:.9rem}
+.diag-kicker{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--txt3);margin-bottom:.28rem}
+.diag-title{font-family:'Bricolage Grotesque','IBM Plex Sans',sans-serif;font-size:1.06rem;font-weight:700;line-height:1.2;color:var(--txt)}
+.diag-state{
+  flex:0 0 auto;display:inline-flex;align-items:center;gap:.42rem;
+  border-radius:999px;padding:.28rem .58rem;font-size:.71rem;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;border:1px solid rgba(255,255,255,.08);
+  background:rgba(255,255,255,.03);
+}
+.diag-state.ok{color:var(--grn);border-color:rgba(52,211,153,.28);background:rgba(52,211,153,.08)}
+.diag-state.warn{color:#fcd34d;border-color:rgba(251,191,36,.28);background:rgba(251,191,36,.09)}
+.diag-state.off{color:#cfc6ff;border-color:rgba(155,140,255,.24);background:rgba(155,140,255,.08)}
+.diag-dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 12px currentColor}
+.diag-detail{margin-top:.8rem;color:var(--txt2);font-size:.86rem;line-height:1.6}
+.diag-meta{margin-top:.7rem;color:var(--txt3);font-size:.76rem;line-height:1.5}
+.diag-list{display:grid;gap:.65rem;margin:.5rem 0 1rem}
+.diag-row{
+  display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;
+  padding:.78rem .9rem;border-radius:12px;border:1px solid rgba(255,255,255,.07);
+  background:linear-gradient(145deg,rgba(20,20,23,.9),rgba(12,12,15,.86));
+}
+.diag-row .label{font-weight:600;color:var(--txt)}
+.diag-row .detail{color:var(--txt2);font-size:.84rem;line-height:1.55;margin-top:.16rem}
+.diag-row .meta{color:var(--txt3);font-size:.75rem;white-space:nowrap}
+.status-pill{
+  display:inline-flex;align-items:center;gap:.38rem;padding:.22rem .52rem;
+  border-radius:999px;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:var(--txt2);
+}
+.status-pill.ok{color:var(--grn);border-color:rgba(52,211,153,.24);background:rgba(52,211,153,.08)}
+.status-pill.warn{color:#fcd34d;border-color:rgba(251,191,36,.26);background:rgba(251,191,36,.08)}
+.status-pill.off{color:#cfc6ff;border-color:rgba(155,140,255,.26);background:rgba(155,140,255,.08)}
+.aura-strip{
+  display:flex;flex-wrap:wrap;gap:.5rem;margin:.45rem 0 .15rem;
 }
 
 /* ── Tags ──────────────────────────────────────────────── */
@@ -416,6 +491,57 @@ def stat(value: object, label: str) -> str:
     )
 
 
+def status_pill(text: str, tone: str = "off") -> str:
+    tone = tone if tone in {"ok", "warn", "off"} else "off"
+    return (
+        f'<span class="status-pill {tone}">'
+        '<span class="diag-dot" aria-hidden="true"></span>'
+        f'{esc(text)}</span>'
+    )
+
+
+def diagnostic_grid(items: Iterable[dict]) -> str:
+    cards = []
+    for item in items:
+        tone = str(item.get("tone") or "off")
+        if tone not in {"ok", "warn", "off"}:
+            tone = "off"
+        kicker = esc(item.get("kicker") or "Signal")
+        title = esc(item.get("title") or "Untitled")
+        state = esc(item.get("state") or ("Connected" if tone == "ok" else "Attention"))
+        detail = markdown_lite(item.get("detail") or "")
+        meta = markdown_lite(item.get("meta") or "")
+        cards.append(
+            f'<div class="diag-card {tone}">'
+            '<div class="diag-top">'
+            f'<div><div class="diag-kicker">{kicker}</div><div class="diag-title">{title}</div></div>'
+            f'<div class="diag-state {tone}"><span class="diag-dot" aria-hidden="true"></span>{state}</div>'
+            '</div>'
+            f'<div class="diag-detail">{detail}</div>'
+            f'<div class="diag-meta">{meta}</div>'
+            '</div>'
+        )
+    return f'<div class="diag-grid">{"".join(cards)}</div>'
+
+
+def diagnostic_rows(items: Iterable[dict]) -> str:
+    rows = []
+    for item in items:
+        tone = str(item.get("tone") or "off")
+        if tone not in {"ok", "warn", "off"}:
+            tone = "off"
+        label = esc(item.get("label") or "Diagnostic")
+        detail = markdown_lite(item.get("detail") or "")
+        meta = esc(item.get("meta") or "")
+        rows.append(
+            '<div class="diag-row">'
+            f'<div><div class="label">{label}</div><div class="detail">{detail}</div></div>'
+            f'<div class="meta">{status_pill(meta or tone.title(), tone)}</div>'
+            '</div>'
+        )
+    return f'<div class="diag-list">{"".join(rows)}</div>'
+
+
 def tag(text: str, accent: bool = False) -> str:
     return f'<span class="tag{" acc" if accent else ""}">{esc(text)}</span>'
 
@@ -518,8 +644,10 @@ PAGES = [
     "🏠  Home",
     "💬  Dataset Chat",
     "🤖  My Models",
+    "🛰️  Apps",
     "📦  Dataset Hub",
     "🌐  Model Hub",
+    "🧪  Diagnostics",
     "🔑  API Keys",
     "⚡  Upgrade",
     "⚙️  Account",
@@ -528,6 +656,7 @@ PAGES = [
 ADMIN_PAGE = "👑  Admin"
 NAV_STATE_KEY = "nav_page"
 NAV_REQUEST_KEY = "nav_request"
+SIGN_OUT_REQUEST_KEY = "sign_out_requested"
 
 
 def go_to(page: str) -> None:
@@ -546,7 +675,7 @@ def sidebar_nav(user: dict) -> str:
     """Render the sidebar and return the selected page label."""
     plan = plan_for(user["plan"])
     pages = list(PAGES)
-    if user.get("email") == ADMIN_EMAIL:
+    if is_admin(user.get("email")):
         pages.append(ADMIN_PAGE)
 
     # Apply any pending go_to() request while the radio still does not exist.
@@ -581,8 +710,7 @@ def sidebar_nav(user: dict) -> str:
 
         divider()
         if st.button("Sign out", use_container_width=True, type="secondary"):
-            st.session_state.clear()
-            st.rerun()
+            st.session_state[SIGN_OUT_REQUEST_KEY] = True
         st.markdown(
             '<div class="small" style="margin-top:.6rem">Private by default · built for builders</div>',
             unsafe_allow_html=True,

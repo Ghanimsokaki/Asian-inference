@@ -1,12 +1,12 @@
 # ⚡ Asian Inference
 
-AI dataset generator, model fine-tuner and community hub — like Hugging Face, but yours.
+AI dataset generator, model fine-tuner and community hub — your own private AI hub.
 
 Chat with an assistant that answers questions about machine learning and generates
 synthetic datasets on request, then turns any of them into a ready-to-run Google
 Colab fine-tuning notebook.
 
-The chat works with no inference token configured — it falls back to built-in
+The chat works with no model token configured — it falls back to built-in
 answers about the platform rather than failing.
 
 ---
@@ -16,10 +16,12 @@ answers about the platform rather than failing.
 | Feature | Description |
 |---|---|
 | Dataset Chat | A general assistant: ask it anything about ML, datasets or training — and it generates datasets on request |
+| Persistent memory | Optional Supabase-backed chat memory that survives new sessions |
 | Model fine-tuner | Pick a base model → get a generated Colab training notebook |
+| Apps builder | Generate Apache-2.0 app bundles with GitHub workflow files and Modal GPU worker templates |
 | Dataset Hub | Browse, preview and download community datasets (CSV / JSON / JSONL) |
 | Model Hub | Browse community models and run live inference |
-| API keys | Your own `asi-` key, plus slots for third-party credentials |
+| API keys | Your own `asi-` key, plus slots for third-party registry credentials |
 | Account | Change your password, review token history and billing events |
 | Admin panel | Users, datasets, models, tickets, token grants and config diagnostics |
 
@@ -38,14 +40,16 @@ successfully, and refunded automatically if saving then fails.
 
 ## Architecture
 
-```
+```text
 app.py              Streamlit pages — collect input, call core, render
 core.py             Domain rules: accounts, plans, quotas, tokens, ownership
 store.py            SQLite persistence (WAL, transactions, migrations)
 config.py           Secrets, plans and constants — one source of truth
 ui.py               Design tokens, components, navigation, HTML escaping
-inference.py        Hugging Face inference, dataset synthesis, Colab notebooks
-hf_storage.py       Private Hugging Face Hub storage (optional offsite mirror)
+inference.py        Managed inference, dataset synthesis, Colab notebooks
+hf_storage.py       Private remote registry storage (optional offsite mirror)
+supabase_memory.py  Optional Supabase-backed persistent chat memory
+supabase_backend.py Optional Supabase mirror for core app data and recovery
 billing.py          Stripe checkout + Traakteer, with verified webhooks
 webhook_server.py   Standalone HTTP endpoint for payment webhooks
 tests/              pytest suite
@@ -59,14 +63,26 @@ tests/              pytest suite
 API keys, tickets, token history and billing events. It is created automatically on first
 run, and a pre-existing `db.json` from an older version is imported once on startup.
 
-When `HF_TOKEN` is configured, dataset rows are **also** mirrored to a private Hugging Face
-dataset repository owned by the platform, and each model gets its own private model repo.
-Users never see or manage a repository. If the mirror is unavailable the dataset still
-saves and is recorded as `local` — the Admin panel shows the connection status.
+When `MODEL_PROVIDER_TOKEN` is configured, dataset rows are also mirrored to a private
+remote registry owned by the platform. If a user saves their own registry token in the
+app, generation, inference and model provisioning can use that too.
+
+When Supabase is configured, Dataset Chat remembers previous turns across sessions using
+`supabase_memory.py`, and the app can also store its core product data there for better
+durability. With `SUPABASE_PRIMARY_BACKEND = true`, Streamlit keeps the UI while Supabase
+becomes the primary backend for users, datasets, models, API keys, tickets, token logs,
+billing events and webhook claims.
+
+On a fresh deploy with an empty local SQLite file, the app can restore users, datasets,
+models, API keys, token logs, billing events and support tickets from Supabase
+automatically.
+
+Run `supabase_schema.sql` once in your Supabase SQL editor to create both the chat memory
+table and the backend tables.
 
 > **Note on hosting:** Streamlit Community Cloud gives each app an ephemeral filesystem, so
-> the database does not survive a redeploy there. For durable data, run the app somewhere
-> with a persistent disk and point `DATA_DIR` at it.
+> the local database does not survive a redeploy there. For durable local data, run the app
+> somewhere with a persistent disk and point `DATA_DIR` at it.
 
 ---
 
@@ -79,7 +95,7 @@ streamlit run app.py
 ```
 
 The app works with no secrets at all: sign up, chat, browse and manage your account.
-Dataset generation needs an inference token (`HF_TOKEN`); paid plans need Stripe or
+Dataset generation and managed inference need a registry token; paid plans need Stripe or
 Traakteer credentials.
 
 ### Tests
@@ -98,9 +114,17 @@ Create `.streamlit/secrets.toml` locally (it is gitignored) or paste into
 **App settings → Secrets** on Streamlit Cloud:
 
 ```toml
-SECRET_KEY = "a long random string"       # required in production
-HF_TOKEN   = "hf_..."                     # inference + offsite storage
-ADMIN_EMAIL = "you@example.com"           # who gets the admin panel
+SECRET_KEY = "a long random string"                # required in production
+MODEL_PROVIDER_TOKEN = "..."                      # inference + offsite storage
+ADMIN_EMAIL = "you@example.com"                   # who gets the admin panel
+
+# Optional — persistent chat memory
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "..."
+SUPABASE_SCHEMA = "public"
+SUPABASE_CHAT_TABLE = "chat_memories"
+SUPABASE_APP_PREFIX = "ai"
+SUPABASE_PRIMARY_BACKEND = true
 
 # Optional — card payments
 STRIPE_SECRET_KEY     = "sk_live_..."
@@ -114,17 +138,37 @@ TRAAKTEER_SECRET = "..."
 # Optional
 PUBLIC_URL = "https://your-app.streamlit.app"
 DATA_DIR   = "/var/lib/asian-inference"
+AUTH_COOKIE_NAME = "asian_inference_session"
+AUTH_SESSION_DAYS = 180
 MUSIC_URL  = "https://example.com/ambient.mp3"
 ```
 
 | Secret | Effect when missing |
 |---|---|
 | `SECRET_KEY` | A placeholder is used and the admin panel warns. Set it in production. |
-| `HF_TOKEN` | Generation and inference are unavailable; datasets save locally only. |
+| `MODEL_PROVIDER_TOKEN` | Generation and managed inference are unavailable unless the user saves their own registry token in API Keys. Datasets still save locally. |
+| `SUPABASE_*` | Chat memory becomes session-only, and the Supabase-backed primary/mirror backend is disabled. |
+| `SUPABASE_PRIMARY_BACKEND` | When `true`, core app reads prefer Supabase while SQLite remains a local fallback/cache. |
+| `AUTH_COOKIE_NAME` / `AUTH_SESSION_DAYS` | Control the persistent sign-in cookie name and how long saved browser sessions last. |
 | `STRIPE_*` / `TRAAKTEER_SECRET` | Paid upgrade buttons are disabled rather than linking to a checkout whose payment could never be credited. |
 | `ADMIN_EMAIL` | Falls back to the built-in default. |
 
 Install `stripe` (commented out in `requirements.txt`) only if you use Stripe Checkout.
+
+---
+
+## Supabase setup
+
+1. Create a Supabase project.
+2. Open the SQL editor and run `supabase_schema.sql`.
+3. Add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to Streamlit secrets.
+4. Set `SUPABASE_PRIMARY_BACKEND = true` if you want Supabase to be the main backend.
+5. Restart the app.
+
+Using the service-role key is recommended because the Streamlit backend writes memory
+and mirrored app data server-side. If you choose to use an anon key instead, make sure
+your RLS policies allow server-side reads and writes to both the chat memory table and
+the mirrored app tables.
 
 ---
 
@@ -154,8 +198,8 @@ recorded so a replayed webhook cannot grant tokens twice.
 2. Download the generated `.ipynb`.
 3. Open it at [colab.research.google.com](https://colab.research.google.com).
 4. Runtime → Change runtime type → **T4 GPU** (free tier).
-5. Run all. The notebook prompts for your Hugging Face token at runtime — it is never
-   written into the file — then LoRA fine-tunes and pushes the weights.
+5. Run all. The notebook prompts for your repository access token at runtime — it is never
+   written into the file.
 
 ---
 

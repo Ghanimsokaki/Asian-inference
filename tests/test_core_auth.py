@@ -1,4 +1,5 @@
 """Accounts, passwords and rate limiting."""
+import config
 import core
 import store
 
@@ -63,3 +64,43 @@ def test_change_password(user):
     assert core.change_password(user["email"], "wrong", "brand-new-pass")[0] is False
     assert core.change_password(user["email"], "correct-horse", "brand-new-pass")[0] is True
     assert core.login(user["email"], "brand-new-pass")[0] is True
+
+
+def test_persistent_sessions_roundtrip(user):
+    token = core.create_persistent_session(user["email"])
+    assert token
+    restored = core.authenticate_persistent_session(token)
+    assert restored is not None
+    assert restored["email"] == user["email"]
+
+
+def test_expired_persistent_sessions_are_rejected(user):
+    token = core.create_persistent_session(user["email"])
+    token_hash = core._hash_session_token(token)
+    assert token_hash
+    store.touch_auth_session(token_hash, "2000-01-01T00:00:00+00:00")
+    assert core.authenticate_persistent_session(token) is None
+    assert store.get_auth_session(token_hash) is None
+
+
+def test_password_change_revokes_persistent_sessions(user):
+    token = core.create_persistent_session(user["email"])
+    assert token
+    ok, _ = core.change_password(user["email"], "correct-horse", "brand-new-pass")
+    assert ok is True
+    assert core.authenticate_persistent_session(token) is None
+
+
+def test_revoke_all_persistent_sessions(user):
+    first = core.create_persistent_session(user["email"])
+    second = core.create_persistent_session(user["email"])
+    assert first and second
+    assert core.revoke_all_persistent_sessions(user["email"]) == 2
+    assert core.authenticate_persistent_session(first) is None
+    assert core.authenticate_persistent_session(second) is None
+
+
+def test_admin_can_be_matched_by_email_local_part(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_EMAIL", "emir.erningpraja")
+    assert config.is_admin("emir.erningpraja@example.com") is True
+    assert config.is_admin("someone@example.com") is False

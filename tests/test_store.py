@@ -148,3 +148,120 @@ def test_bootstrap_never_raises(monkeypatch):
 
     monkeypatch.setattr(store, "migrate_legacy_json", boom)
     core.bootstrap()  # a failed import must not take the app down
+
+
+def test_restore_from_supabase_hydrates_an_empty_db(monkeypatch):
+    import supabase_backend
+
+    monkeypatch.setattr(supabase_backend, "is_configured", lambda: True)
+    monkeypatch.setattr(supabase_backend, "primary_enabled", lambda: False)
+    monkeypatch.setattr(
+        supabase_backend,
+        "fetch_bootstrap_snapshot",
+        lambda: {
+            "users": [{
+                "email": "remote@example.com", "name": "Remote", "pw_hash": "hash",
+                "plan": "pro", "tokens": 900, "flagged": False, "flag_reason": "",
+                "platform_api_key": None, "traakteer_id": "", "stripe_customer_id": None,
+                "stripe_subscription_id": None, "created": "2026-01-01T00:00:00",
+                "updated": "2026-01-01T00:00:00", "last_reset": "2026-01-01T00:00:00",
+            }],
+            "datasets": [{
+                "id": "ds1", "owner": "remote@example.com", "name": "DS",
+                "description": "", "rows": [{"a": 1}], "row_count": 1,
+                "public": False, "tags": ["demo"], "downloads": 0, "likes": 0,
+                "storage_backend": "local", "storage_repo": None, "storage_path": None,
+                "created": "2026-01-01T00:00:00", "updated": "2026-01-01T00:00:00",
+            }],
+            "models": [],
+            "api_keys": [{
+                "user_email": "remote@example.com", "label": "registry",
+                "key_value": "hf_remote", "uses": 0, "last_used": None,
+                "created_at": "2026-01-01T00:00:00",
+            }],
+            "support_tickets": [],
+            "token_logs": [{
+                "user_email": "remote@example.com", "delta": 500, "reason": "signup",
+                "balance": 500, "created_at": "2026-01-01T00:00:00",
+            }],
+            "billing_events": [{
+                "user_email": "remote@example.com", "event_type": "invoice.paid",
+                "details": {"amount": 9.99}, "created_at": "2026-01-01T00:00:00",
+            }],
+            "auth_sessions": [{
+                "token_hash": "hash1",
+                "user_email": "remote@example.com",
+                "created_at": "2026-01-01T00:00:00",
+                "expires_at": "2026-06-01T00:00:00",
+                "last_seen_at": "2026-01-01T00:00:00",
+            }],
+        },
+    )
+
+    assert store.restore_from_supabase() == 1
+    assert store.get_user("remote@example.com")["plan"] == "pro"
+    assert store.get_dataset("ds1")["rows"] == [{"a": 1}]
+    assert store.user_api_keys("remote@example.com")[0]["key_value"] == "hf_remote"
+    assert store.token_history("remote@example.com")[0]["reason"] == "signup"
+    assert store.billing_history("remote@example.com")[0]["event_type"] == "invoice.paid"
+    assert store.get_auth_session("hash1")["user_email"] == "remote@example.com"
+
+
+def test_get_user_prefers_supabase_when_primary_backend_is_enabled(monkeypatch):
+    import supabase_backend
+
+    store.create_user("local@example.com", "Local", "hash", "starter", 500)
+    monkeypatch.setattr(supabase_backend, "primary_enabled", lambda: True)
+    monkeypatch.setattr(
+        supabase_backend,
+        "get_user",
+        lambda email: {
+            "email": email, "name": "Remote", "pw_hash": "hash", "plan": "pro",
+            "tokens": 999, "flagged": False, "flag_reason": "", "platform_api_key": None,
+            "traakteer_id": "", "stripe_customer_id": None, "stripe_subscription_id": None,
+            "created": "2026-01-01T00:00:00", "updated": "2026-01-01T00:00:00",
+            "last_reset": "2026-01-01T00:00:00",
+        },
+    )
+
+    assert store.get_user("local@example.com")["plan"] == "pro"
+
+
+def test_token_history_prefers_supabase_when_primary_backend_is_enabled(monkeypatch):
+    import supabase_backend
+
+    monkeypatch.setattr(supabase_backend, "primary_enabled", lambda: True)
+    monkeypatch.setattr(
+        supabase_backend,
+        "token_history",
+        lambda email, limit=100: [{"delta": 1, "reason": "remote", "balance": 10, "created_at": "x"}],
+    )
+
+    assert store.token_history("member@example.com")[0]["reason"] == "remote"
+
+
+def test_announcements_can_be_set_and_cleared():
+    store.set_announcement("Hello builders", "emir.erningpraja@example.com", active=True)
+    announcement = store.get_announcement()
+    assert announcement["message"] == "Hello builders"
+    assert announcement["active"] is True
+
+    store.clear_announcement()
+    cleared = store.get_announcement()
+    assert cleared["active"] is False
+    assert cleared["message"] == ""
+
+
+def test_auth_sessions_can_be_created_touched_and_deleted():
+    store.create_user("a@example.com", "A", "hash", "starter", 500)
+    assert store.create_auth_session("tokhash", "a@example.com", "2099-01-01T00:00:00+00:00") is True
+    session = store.get_auth_session("tokhash")
+    assert session is not None
+    assert session["user_email"] == "a@example.com"
+
+    assert store.touch_auth_session("tokhash", "2099-02-01T00:00:00+00:00") is True
+    updated = store.get_auth_session("tokhash")
+    assert updated["expires_at"] == "2099-02-01T00:00:00+00:00"
+
+    assert store.delete_auth_session("tokhash") is True
+    assert store.get_auth_session("tokhash") is None

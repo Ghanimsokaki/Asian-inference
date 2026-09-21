@@ -18,9 +18,9 @@ from typing import Any, Sequence
 
 import store
 from config import (
-    ADMIN_EMAIL, ADMIN_PLAN, DEFAULT_PLAN, MANUAL_GRANTS_PER_HOUR_BEFORE_FLAG,
-    MAX_MANUAL_GRANT, PLANS, RATE_LIMITS, SECRET_KEY, TOKENS_PER_ROW,
-    is_admin, plan_for,
+    ADMIN_PLAN, AUTH_SESSION_DAYS, DEFAULT_PLAN,
+    MANUAL_GRANTS_PER_HOUR_BEFORE_FLAG, MAX_MANUAL_GRANT, PLANS, RATE_LIMITS,
+    SECRET_KEY, TOKENS_PER_ROW, is_admin, plan_for,
 )
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
@@ -38,7 +38,7 @@ class PlanLimitError(RuntimeError):
 
 
 class StorageUnavailableError(RuntimeError):
-    """Platform-managed Hugging Face storage could not be reached."""
+    """Platform-managed remote storage could not be reached."""
 
 
 class AuthError(RuntimeError):
@@ -174,11 +174,77 @@ def change_password(email: str, current: str, new: str) -> tuple[bool, str]:
     if len(new) > MAX_PASSWORD_LENGTH:
         return False, "New password is too long."
     store.update_user(user["email"], pw_hash=hash_password(new))
+    revoke_all_persistent_sessions(user["email"])
     return True, "Password updated."
 
 
 def get_user(email: str) -> dict | None:
     return store.get_user(normalise_email(email))
+
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    try:
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+
+def create_persistent_session(email: str, days: int = AUTH_SESSION_DAYS) -> str | None:
+    email = normalise_email(email)
+    if not email or store.get_user(email) is None:
+        return None
+    token = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+    if not store.create_auth_session(_hash_session_token(token), email, expires_at):
+        return None
+    return token
+
+
+
+def authenticate_persistent_session(token: str) -> dict | None:
+    token = (token or "").strip()
+    if not token:
+        return None
+    token_hash = _hash_session_token(token)
+    session = store.get_auth_session(token_hash)
+    if not session:
+        return None
+    now = datetime.now(timezone.utc)
+    expires_at = _parse_timestamp(session.get("expires_at"))
+    if expires_at is None or expires_at <= now:
+        store.delete_auth_session(token_hash)
+        return None
+    user = store.get_user(normalise_email(session.get("user_email") or ""))
+    if user is None or (user.get("flagged") and not is_admin(user.get("email"))):
+        store.delete_auth_session(token_hash)
+        return None
+    refreshed_expiry = (now + timedelta(days=max(1, int(AUTH_SESSION_DAYS)))).isoformat(timespec="seconds")
+    store.touch_auth_session(token_hash, refreshed_expiry)
+    return user
+
+
+
+def revoke_persistent_session(token: str) -> bool:
+    token = (token or "").strip()
+    if not token:
+        return False
+    return store.delete_auth_session(_hash_session_token(token))
+
+
+
+def revoke_all_persistent_sessions(email: str) -> int:
+    return store.delete_auth_sessions_for_user(normalise_email(email))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -329,12 +395,57 @@ def remove_api_key(user: dict, label: str) -> bool:
     return store.delete_api_key(user["email"], label)
 
 
+_MODEL_TOKEN_HINTS = (
+    "model", "registry", "inference", "storage", "provider", "hub", "hf", "hugging",
+)
+
+
+def _looks_model_token(value: str) -> bool:
+    value = (value or "").strip()
+    if not value:
+        return False
+    return value.startswith("hf_") or len(value) >= 24
+
+
+def resolve_model_token(user_or_email: dict | str | None) -> str | None:
+    """Best-effort user-scoped access token for model/storage operations.
+
+    Users store third-party keys under arbitrary labels, so the resolver uses a
+    few soft hints rather than depending on one exact label. A platform token
+    still works as the fallback via :mod:`config`.
+    """
+    if isinstance(user_or_email, dict):
+        email = normalise_email(user_or_email.get("email", ""))
+    else:
+        email = normalise_email(str(user_or_email or ""))
+    if not email:
+        return None
+
+    entries = store.user_api_keys(email)
+    scored: list[tuple[int, str]] = []
+    for entry in entries:
+        label = str(entry.get("label") or "").strip().lower()
+        value = str(entry.get("key_value") or "").strip()
+        if not _looks_model_token(value):
+            continue
+        score = 1
+        if value.startswith("hf_"):
+            score += 3
+        if any(hint in label for hint in _MODEL_TOKEN_HINTS):
+            score += 2
+        scored.append((score, value))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
 # ─────────────────────────────────────────────────────────────────────
 # DATASETS
 # ─────────────────────────────────────────────────────────────────────
 def create_dataset(
     owner: str, name: str, description: str, rows: Sequence[dict],
-    public: bool, tags: Sequence[str],
+    public: bool, tags: Sequence[str], provider_token: str | None = None,
 ) -> str:
     """Persist a dataset after enforcing plan limits.
 
@@ -369,28 +480,30 @@ def create_dataset(
     tags = [t.strip()[:30] for t in tags if t.strip()][:10]
 
     dataset_id = uuid.uuid4().hex[:10]
-    backend, repo, path = mirror_to_hub(dataset_id, rows)
+    backend, repo, path = mirror_to_hub(dataset_id, rows, provider_token=provider_token)
     store.insert_dataset(dataset_id, owner, name, description, rows, public, tags,
                          backend, repo, path)
     return dataset_id
 
 
-def mirror_to_hub(dataset_id: str, rows: Sequence[dict]) -> tuple[str, str | None, str | None]:
-    """Best-effort offsite copy of a dataset to the platform's private Hub repo.
+def mirror_to_hub(
+    dataset_id: str, rows: Sequence[dict], provider_token: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Best-effort offsite copy of a dataset to managed remote storage.
 
-    The database is the source of truth, so a missing or failing Hub connection
-    never blocks a save — the dataset is simply recorded as ``local``. Returns
-    ``(backend, repo, path)``.
+    The database is the source of truth, so a missing or failing remote
+    connection never blocks a save — the dataset is simply recorded as
+    ``local``. Returns ``(backend, repo, path)``.
     """
     try:
         import hf_storage
 
-        repo = hf_storage.storage_repo()
+        repo = hf_storage.storage_repo(provider_token)
         if not repo:
             return "local", None, None
         path = hf_storage.storage_path(dataset_id)
-        if hf_storage.put_json(repo, path, list(rows)):
-            return "huggingface", repo, path
+        if hf_storage.put_json(repo, path, list(rows), token=provider_token):
+            return "managed", repo, path
         return "local", None, None
     except Exception:
         # Network, import or API problems must not cost the user their dataset.
@@ -416,7 +529,7 @@ def delete_dataset(dataset_id: str, requester: str) -> tuple[bool, str]:
         return False, "You do not have permission to delete that dataset."
 
     store.delete_dataset(dataset_id)
-    if dataset.get("storage_backend") == "huggingface" and dataset.get("storage_path"):
+    if dataset.get("storage_backend") in {"managed", "huggingface"} and dataset.get("storage_path"):
         try:
             import hf_storage
 
@@ -445,6 +558,36 @@ def set_dataset_visibility(dataset_id: str, requester: str, public: bool) -> tup
 # ─────────────────────────────────────────────────────────────────────
 # MODELS
 # ─────────────────────────────────────────────────────────────────────
+def provision_model_repo(owner: str, model_key: str, provider_token: str | None = None) -> str | None:
+    """Create or reuse a managed model destination.
+
+    Returns None when no remote registry is available, leaving callers free to
+    fall back to a user-supplied target path.
+    """
+    try:
+        import hf_storage
+
+        return hf_storage.make_model_repo(owner, model_key, token=provider_token)
+    except Exception:
+        return None
+
+
+def suggested_model_repo(owner: str, model_key: str,
+                         provider_token: str | None = None) -> str:
+    """Best-effort output path the notebook can target when auto-provisioning fails."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", (model_key or "model").strip().lower()).strip("-")
+    slug = slug[:48] or "model"
+    try:
+        import hf_storage
+
+        username = hf_storage.whoami(provider_token)
+        if username:
+            return f"{username}/{slug}"
+    except Exception:
+        pass
+    return f"your-namespace/{slug}"
+
+
 def create_model(
     owner: str, name: str, description: str, base_model: str,
     hf_repo: str, public: bool, tags: Sequence[str],
@@ -531,3 +674,7 @@ def bootstrap() -> None:
         store.migrate_legacy_json()
     except Exception:
         logging.getLogger(__name__).exception("Legacy db.json import failed")
+    try:
+        store.restore_from_supabase()
+    except Exception:
+        logging.getLogger(__name__).exception("Supabase recovery failed")

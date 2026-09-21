@@ -30,6 +30,42 @@ SCHEMA_VERSION = 1
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialised = False
+_mirror_local = threading.local()
+
+
+def _mirror_allowed() -> bool:
+    return not getattr(_mirror_local, "disabled", False)
+
+
+@contextmanager
+def suspend_remote_sync() -> Iterator[None]:
+    previous = getattr(_mirror_local, "disabled", False)
+    _mirror_local.disabled = True
+    try:
+        yield
+    finally:
+        _mirror_local.disabled = previous
+
+
+def _mirror_call(name: str, *args: Any) -> None:
+    if not _mirror_allowed():
+        return
+    try:
+        import supabase_backend
+
+        getattr(supabase_backend, name)(*args)
+    except Exception:
+        pass
+
+
+def _use_supabase_primary() -> bool:
+    try:
+        import supabase_backend
+
+        return supabase_backend.primary_enabled()
+    except Exception:
+        return False
+
 
 
 def utcnow() -> str:
@@ -208,6 +244,24 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
     provider   TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS announcements (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    message    TEXT NOT NULL DEFAULT '',
+    author     TEXT NOT NULL DEFAULT '',
+    active     INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash   TEXT PRIMARY KEY,
+    user_email   TEXT NOT NULL REFERENCES users(email) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_email, expires_at DESC);
 """
 
 
@@ -228,6 +282,106 @@ def ensure_db() -> None:
         finally:
             conn.close()
         _initialised = True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# REMOTE MIRROR HELPERS
+# ─────────────────────────────────────────────────────────────────────
+def _local_user(email: str) -> dict | None:
+    row = connection().execute(
+        "SELECT * FROM users WHERE email = ?", (email.strip().lower(),)
+    ).fetchone()
+    return _user_row(row)
+
+
+def _local_dataset(dataset_id: str) -> dict | None:
+    row = connection().execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+    return _dataset_row(row)
+
+
+def _local_model(model_id: str) -> dict | None:
+    row = connection().execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
+    return _model_row(row)
+
+
+def _local_api_key(email: str, label: str) -> dict | None:
+    row = connection().execute(
+        """SELECT label, key_value, uses, last_used, created_at FROM api_keys
+           WHERE user_email = ? AND label = ?""",
+        (email, label),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _local_ticket(ticket_id: str) -> dict | None:
+    row = connection().execute(
+        "SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _local_announcement() -> dict | None:
+    row = connection().execute("SELECT * FROM announcements WHERE id = 1").fetchone()
+    return _announcement_row(row)
+
+
+def _local_auth_session(token_hash: str) -> dict | None:
+    row = connection().execute(
+        "SELECT * FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _mirror_user(email: str) -> None:
+    user = _local_user(email)
+    if user:
+        _mirror_call("upsert_user", user)
+    else:
+        _mirror_call("delete_user", email)
+
+
+def _mirror_dataset(dataset_id: str) -> None:
+    dataset = _local_dataset(dataset_id)
+    if dataset:
+        _mirror_call("upsert_dataset", dataset)
+    else:
+        _mirror_call("delete_dataset", dataset_id)
+
+
+def _mirror_model(model_id: str) -> None:
+    model = _local_model(model_id)
+    if model:
+        _mirror_call("upsert_model", model)
+    else:
+        _mirror_call("delete_model", model_id)
+
+
+def _mirror_api_key(email: str, label: str) -> None:
+    entry = _local_api_key(email, label)
+    if entry:
+        _mirror_call("upsert_api_key", email, entry)
+    else:
+        _mirror_call("delete_api_key", email, label)
+
+
+def _mirror_ticket(ticket_id: str) -> None:
+    ticket = _local_ticket(ticket_id)
+    if ticket:
+        _mirror_call("upsert_support_ticket", ticket)
+
+
+def _mirror_announcement() -> None:
+    announcement = _local_announcement()
+    if announcement:
+        _mirror_call("upsert_announcement", announcement)
+
+
+def _mirror_auth_session(token_hash: str) -> None:
+    session = _local_auth_session(token_hash)
+    if session:
+        _mirror_call("upsert_auth_session", session)
+    else:
+        _mirror_call("delete_auth_session", token_hash)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -307,6 +461,18 @@ def _model_row(row: sqlite3.Row | None) -> dict | None:
     }
 
 
+def _announcement_row(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "message": row["message"] or "",
+        "author": row["author"] or "",
+        "active": bool(row["active"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────
 # USERS
 # ─────────────────────────────────────────────────────────────────────
@@ -326,6 +492,11 @@ def create_user(email: str, name: str, pw_hash: str, plan: str, tokens: int) -> 
                    VALUES (?, ?, 'signup', ?, ?)""",
                 (email, tokens, tokens, now),
             )
+        _mirror_user(email)
+        _mirror_call("append_token_log", {
+            "user_email": email, "delta": tokens, "reason": "signup",
+            "balance": tokens, "created_at": now,
+        })
         return True
     except sqlite3.IntegrityError:
         return False
@@ -334,6 +505,15 @@ def create_user(email: str, name: str, pw_hash: str, plan: str, tokens: int) -> 
 def get_user(email: str) -> dict | None:
     if not email:
         return None
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            user = supabase_backend.get_user(email)
+            if user is not None:
+                return user
+        except Exception:
+            pass
     row = connection().execute(
         "SELECT * FROM users WHERE email = ?", (email.strip().lower(),)
     ).fetchone()
@@ -362,27 +542,55 @@ def update_user(email: str, **fields: Any) -> bool:
             f"UPDATE users SET {assignments} WHERE email = ?",
             (*fields.values(), email.strip().lower()),
         )
+    if cur.rowcount > 0:
+        _mirror_user(email)
     return cur.rowcount > 0
 
 
 def delete_user(email: str) -> bool:
+    email = email.strip().lower()
     with transaction() as conn:
-        cur = conn.execute("DELETE FROM users WHERE email = ?", (email.strip().lower(),))
+        cur = conn.execute("DELETE FROM users WHERE email = ?", (email,))
+    if cur.rowcount > 0:
+        _mirror_call("delete_user", email)
     return cur.rowcount > 0
 
 
 def list_users() -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.list_users()
+        except Exception:
+            pass
     rows = connection().execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
     return [_user_row(r) for r in rows]
 
 
 def count_users() -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_users()
+        except Exception:
+            pass
     return connection().execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
 
 def find_user_by_platform_key(key: str) -> dict | None:
     if not key:
         return None
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            user = supabase_backend.find_user_by_platform_key(key)
+            if user is not None:
+                return user
+        except Exception:
+            pass
     row = connection().execute(
         "SELECT * FROM users WHERE platform_api_key = ?", (key,)
     ).fetchone()
@@ -390,22 +598,108 @@ def find_user_by_platform_key(key: str) -> dict | None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# PERSISTENT AUTH SESSIONS
+# ─────────────────────────────────────────────────────────────────────
+def create_auth_session(token_hash: str, email: str, expires_at: str) -> bool:
+    now = utcnow()
+    try:
+        with transaction() as conn:
+            conn.execute(
+                """INSERT INTO auth_sessions
+                   (token_hash, user_email, created_at, expires_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (token_hash, email.strip().lower(), now, str(expires_at), now),
+            )
+        _mirror_auth_session(token_hash)
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+
+def get_auth_session(token_hash: str) -> dict | None:
+    if not token_hash:
+        return None
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            session = supabase_backend.get_auth_session(token_hash)
+            if session is not None:
+                return session
+        except Exception:
+            pass
+    row = connection().execute(
+        "SELECT * FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+
+def touch_auth_session(token_hash: str, expires_at: str | None = None) -> bool:
+    ts = utcnow()
+    with transaction() as conn:
+        if expires_at is None:
+            cur = conn.execute(
+                "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+                (ts, token_hash),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE auth_sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?",
+                (ts, str(expires_at), token_hash),
+            )
+    if cur.rowcount > 0:
+        _mirror_auth_session(token_hash)
+    return cur.rowcount > 0
+
+
+
+def delete_auth_session(token_hash: str) -> bool:
+    with transaction() as conn:
+        cur = conn.execute(
+            "DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+        )
+    if cur.rowcount > 0:
+        _mirror_call("delete_auth_session", token_hash)
+    return cur.rowcount > 0
+
+
+
+def delete_auth_sessions_for_user(email: str) -> int:
+    email = email.strip().lower()
+    with transaction() as conn:
+        cur = conn.execute(
+            "DELETE FROM auth_sessions WHERE user_email = ?", (email,)
+        )
+    if cur.rowcount > 0:
+        _mirror_call("delete_auth_sessions_for_user", email)
+    return cur.rowcount
+
+
+# ─────────────────────────────────────────────────────────────────────
 # TOKENS
 # ─────────────────────────────────────────────────────────────────────
 def add_tokens(email: str, amount: int, reason: str) -> int:
     """Credit tokens atomically and return the new balance."""
+    ts = utcnow()
     with transaction() as conn:
         conn.execute(
             "UPDATE users SET tokens = tokens + ?, updated_at = ? WHERE email = ?",
-            (amount, utcnow(), email),
+            (amount, ts, email),
         )
         row = conn.execute("SELECT tokens FROM users WHERE email = ?", (email,)).fetchone()
         balance = row["tokens"] if row else 0
         conn.execute(
             """INSERT INTO token_logs (user_email, delta, reason, balance, created_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (email, amount, reason, balance, utcnow()),
+            (email, amount, reason, balance, ts),
         )
+    _mirror_user(email)
+    _mirror_call("append_token_log", {
+        "user_email": email, "delta": amount, "reason": reason,
+        "balance": balance, "created_at": ts,
+    })
     return balance
 
 
@@ -422,11 +716,12 @@ def spend_tokens(email: str, amount: int, reason: str = "usage") -> tuple[bool, 
         ).fetchone()
         return True, (row["tokens"] if row else 0)
 
+    ts = utcnow()
     with transaction() as conn:
         cur = conn.execute(
             """UPDATE users SET tokens = tokens - ?, updated_at = ?
                WHERE email = ? AND tokens >= ?""",
-            (amount, utcnow(), email, amount),
+            (amount, ts, email, amount),
         )
         row = conn.execute("SELECT tokens FROM users WHERE email = ?", (email,)).fetchone()
         balance = row["tokens"] if row else 0
@@ -435,26 +730,44 @@ def spend_tokens(email: str, amount: int, reason: str = "usage") -> tuple[bool, 
         conn.execute(
             """INSERT INTO token_logs (user_email, delta, reason, balance, created_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (email, -amount, reason, balance, utcnow()),
+            (email, -amount, reason, balance, ts),
         )
+    _mirror_user(email)
+    _mirror_call("append_token_log", {
+        "user_email": email, "delta": -amount, "reason": reason,
+        "balance": balance, "created_at": ts,
+    })
     return True, balance
 
 
 def set_tokens(email: str, amount: int, reason: str) -> int:
+    ts = utcnow()
     with transaction() as conn:
         conn.execute(
             "UPDATE users SET tokens = ?, updated_at = ?, last_reset = ? WHERE email = ?",
-            (amount, utcnow(), utcnow(), email),
+            (amount, ts, ts, email),
         )
         conn.execute(
             """INSERT INTO token_logs (user_email, delta, reason, balance, created_at)
                VALUES (?, 0, ?, ?, ?)""",
-            (email, reason, amount, utcnow()),
+            (email, reason, amount, ts),
         )
+    _mirror_user(email)
+    _mirror_call("append_token_log", {
+        "user_email": email, "delta": 0, "reason": reason,
+        "balance": amount, "created_at": ts,
+    })
     return amount
 
 
 def token_history(email: str, limit: int = 100) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.token_history(email, limit)
+        except Exception:
+            pass
     rows = connection().execute(
         """SELECT delta, reason, balance, created_at FROM token_logs
            WHERE user_email = ? ORDER BY id DESC LIMIT ?""",
@@ -464,6 +777,13 @@ def token_history(email: str, limit: int = 100) -> list[dict]:
 
 
 def count_recent_grants(email: str, since_iso: str, needle: str) -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_recent_grants(email, since_iso, needle)
+        except Exception:
+            pass
     row = connection().execute(
         """SELECT COUNT(*) AS n FROM token_logs
            WHERE user_email = ? AND created_at >= ? AND reason LIKE ?""",
@@ -492,14 +812,31 @@ def insert_dataset(
              int(public), json.dumps(list(tags)), storage_backend, storage_repo,
              storage_path, now, now),
         )
+    _mirror_dataset(dataset_id)
 
 
 def get_dataset(dataset_id: str, *, with_rows: bool = True) -> dict | None:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            dataset = supabase_backend.get_dataset(dataset_id, with_rows=with_rows)
+            if dataset is not None:
+                return dataset
+        except Exception:
+            pass
     row = connection().execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
     return _dataset_row(row, with_rows=with_rows)
 
 
 def user_datasets(email: str, *, with_rows: bool = True) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.user_datasets(email, with_rows=with_rows)
+        except Exception:
+            pass
     rows = connection().execute(
         "SELECT * FROM datasets WHERE owner = ? ORDER BY created_at DESC", (email,)
     ).fetchall()
@@ -507,6 +844,13 @@ def user_datasets(email: str, *, with_rows: bool = True) -> list[dict]:
 
 
 def public_datasets(*, with_rows: bool = True, limit: int = 200) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.public_datasets(with_rows=with_rows, limit=limit)
+        except Exception:
+            pass
     rows = connection().execute(
         "SELECT * FROM datasets WHERE public = 1 ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
@@ -514,11 +858,25 @@ def public_datasets(*, with_rows: bool = True, limit: int = 200) -> list[dict]:
 
 
 def all_datasets(*, with_rows: bool = False) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.all_datasets(with_rows=with_rows)
+        except Exception:
+            pass
     rows = connection().execute("SELECT * FROM datasets ORDER BY created_at DESC").fetchall()
     return [_dataset_row(r, with_rows=with_rows) for r in rows]
 
 
 def count_user_datasets(email: str) -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_user_datasets(email)
+        except Exception:
+            pass
     return connection().execute(
         "SELECT COUNT(*) FROM datasets WHERE owner = ?", (email,)
     ).fetchone()[0]
@@ -530,6 +888,7 @@ def set_dataset_public(dataset_id: str, public: bool) -> None:
             "UPDATE datasets SET public = ?, updated_at = ? WHERE id = ?",
             (int(public), utcnow(), dataset_id),
         )
+    _mirror_dataset(dataset_id)
 
 
 def increment_dataset_downloads(dataset_id: str) -> None:
@@ -537,6 +896,7 @@ def increment_dataset_downloads(dataset_id: str) -> None:
         conn.execute(
             "UPDATE datasets SET downloads = downloads + 1 WHERE id = ?", (dataset_id,)
         )
+    _mirror_dataset(dataset_id)
 
 
 def delete_dataset(dataset_id: str) -> dict | None:
@@ -546,6 +906,7 @@ def delete_dataset(dataset_id: str) -> dict | None:
         return None
     with transaction() as conn:
         conn.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+    _mirror_call("delete_dataset", dataset_id)
     return dataset
 
 
@@ -565,14 +926,31 @@ def insert_model(
             (model_id, owner, name, description, base_model, hf_repo, int(public),
              json.dumps(list(tags)), status, now, now),
         )
+    _mirror_model(model_id)
 
 
 def get_model(model_id: str) -> dict | None:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            model = supabase_backend.get_model(model_id)
+            if model is not None:
+                return model
+        except Exception:
+            pass
     row = connection().execute("SELECT * FROM models WHERE id = ?", (model_id,)).fetchone()
     return _model_row(row)
 
 
 def user_models(email: str) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.user_models(email)
+        except Exception:
+            pass
     rows = connection().execute(
         "SELECT * FROM models WHERE owner = ? ORDER BY created_at DESC", (email,)
     ).fetchall()
@@ -580,6 +958,13 @@ def user_models(email: str) -> list[dict]:
 
 
 def public_models(limit: int = 200) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.public_models(limit)
+        except Exception:
+            pass
     rows = connection().execute(
         "SELECT * FROM models WHERE public = 1 ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
@@ -587,11 +972,25 @@ def public_models(limit: int = 200) -> list[dict]:
 
 
 def all_models() -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.all_models()
+        except Exception:
+            pass
     rows = connection().execute("SELECT * FROM models ORDER BY created_at DESC").fetchall()
     return [_model_row(r) for r in rows]
 
 
 def count_user_models(email: str) -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_user_models(email)
+        except Exception:
+            pass
     return connection().execute(
         "SELECT COUNT(*) FROM models WHERE owner = ?", (email,)
     ).fetchone()[0]
@@ -603,11 +1002,14 @@ def set_model_public(model_id: str, public: bool) -> None:
             "UPDATE models SET public = ?, updated_at = ? WHERE id = ?",
             (int(public), utcnow(), model_id),
         )
+    _mirror_model(model_id)
 
 
 def delete_model(model_id: str) -> bool:
     with transaction() as conn:
         cur = conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
+    if cur.rowcount > 0:
+        _mirror_call("delete_model", model_id)
     return cur.rowcount > 0
 
 
@@ -622,12 +1024,20 @@ def insert_api_key(email: str, label: str, key_value: str) -> bool:
                    VALUES (?, ?, ?, ?)""",
                 (email, label, key_value, utcnow()),
             )
+        _mirror_api_key(email, label)
         return True
     except sqlite3.IntegrityError:
         return False
 
 
 def user_api_keys(email: str) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.user_api_keys(email)
+        except Exception:
+            pass
     rows = connection().execute(
         """SELECT label, key_value, uses, last_used, created_at FROM api_keys
            WHERE user_email = ? ORDER BY created_at DESC""",
@@ -637,6 +1047,13 @@ def user_api_keys(email: str) -> list[dict]:
 
 
 def count_user_api_keys(email: str) -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_user_api_keys(email)
+        except Exception:
+            pass
     return connection().execute(
         "SELECT COUNT(*) FROM api_keys WHERE user_email = ?", (email,)
     ).fetchone()[0]
@@ -647,6 +1064,8 @@ def delete_api_key(email: str, label: str) -> bool:
         cur = conn.execute(
             "DELETE FROM api_keys WHERE user_email = ? AND label = ?", (email, label)
         )
+    if cur.rowcount > 0:
+        _mirror_call("delete_api_key", email, label)
     return cur.rowcount > 0
 
 
@@ -661,12 +1080,20 @@ def insert_ticket(ticket_id: str, email: str, subject: str, message: str) -> boo
                    VALUES (?, ?, ?, ?, ?)""",
                 (ticket_id, email, subject, message, utcnow()),
             )
+        _mirror_ticket(ticket_id)
         return True
     except sqlite3.IntegrityError:
         return False
 
 
 def list_tickets(status: str | None = None) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.list_tickets(status)
+        except Exception:
+            pass
     sql = "SELECT * FROM support_tickets"
     params: tuple = ()
     if status:
@@ -677,11 +1104,34 @@ def list_tickets(status: str | None = None) -> list[dict]:
 
 
 def user_tickets(email: str) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.user_tickets(email)
+        except Exception:
+            pass
     rows = connection().execute(
         "SELECT * FROM support_tickets WHERE user_email = ? ORDER BY created_at DESC",
         (email,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_ticket(ticket_id: str) -> dict | None:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            ticket = supabase_backend.get_ticket(ticket_id)
+            if ticket is not None:
+                return ticket
+        except Exception:
+            pass
+    row = connection().execute(
+        "SELECT * FROM support_tickets WHERE id = ?", (ticket_id,)
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def close_ticket(ticket_id: str, reply: str) -> bool:
@@ -690,13 +1140,68 @@ def close_ticket(ticket_id: str, reply: str) -> bool:
             "UPDATE support_tickets SET status = 'closed', admin_reply = ? WHERE id = ?",
             (reply, ticket_id),
         )
+    if cur.rowcount > 0:
+        _mirror_ticket(ticket_id)
     return cur.rowcount > 0
 
 
 def count_open_tickets() -> int:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return supabase_backend.count_open_tickets()
+        except Exception:
+            pass
     return connection().execute(
         "SELECT COUNT(*) FROM support_tickets WHERE status = 'open'"
     ).fetchone()[0]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ANNOUNCEMENTS
+# ─────────────────────────────────────────────────────────────────────
+def get_announcement() -> dict | None:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            announcement = supabase_backend.get_announcement()
+            if announcement is not None:
+                return announcement
+        except Exception:
+            pass
+    row = connection().execute("SELECT * FROM announcements WHERE id = 1").fetchone()
+    return _announcement_row(row)
+
+
+def set_announcement(message: str, author: str, active: bool = True) -> None:
+    ts = utcnow()
+    with transaction() as conn:
+        conn.execute(
+            """INSERT INTO announcements (id, message, author, active, created_at, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   message=excluded.message,
+                   author=excluded.author,
+                   active=excluded.active,
+                   updated_at=excluded.updated_at""",
+            (message, author, int(active), ts, ts),
+        )
+    _mirror_announcement()
+
+
+def clear_announcement() -> None:
+    ts = utcnow()
+    with transaction() as conn:
+        conn.execute(
+            """INSERT INTO announcements (id, message, author, active, created_at, updated_at)
+               VALUES (1, '', '', 0, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   message='', author='', active=0, updated_at=excluded.updated_at""",
+            (ts, ts),
+        )
+    _mirror_announcement()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -737,15 +1242,27 @@ def clear_rate_limits(subject: str | None = None) -> None:
 # BILLING
 # ─────────────────────────────────────────────────────────────────────
 def log_billing_event(email: str, event_type: str, details: dict | None = None) -> None:
+    ts = utcnow()
     with transaction() as conn:
         conn.execute(
             """INSERT INTO billing_events (user_email, event_type, details, created_at)
                VALUES (?, ?, ?, ?)""",
-            (email, event_type, json.dumps(details or {}, default=str), utcnow()),
+            (email, event_type, json.dumps(details or {}, default=str), ts),
         )
+    _mirror_call("append_billing_event", email, event_type, details or {}, ts)
 
 
 def billing_history(email: str, limit: int = 100) -> list[dict]:
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            return [
+                {**row, "details": row.get("details") or {}}
+                for row in supabase_backend.billing_history(email, limit)
+            ]
+        except Exception:
+            pass
     rows = connection().execute(
         """SELECT event_type, details, created_at FROM billing_events
            WHERE user_email = ? ORDER BY id DESC LIMIT ?""",
@@ -758,15 +1275,179 @@ def mark_webhook_processed(event_id: str, provider: str) -> bool:
     """Claim a webhook event id. Returns False when it was already handled."""
     if not event_id:
         return True
+    ts = utcnow()
+    if _use_supabase_primary():
+        try:
+            import supabase_backend
+
+            claimed = supabase_backend.claim_processed_webhook(event_id, provider, ts)
+            if not claimed:
+                return False
+        except Exception:
+            pass
     try:
         with transaction() as conn:
             conn.execute(
                 "INSERT INTO processed_webhooks (event_id, provider, created_at) VALUES (?, ?, ?)",
-                (event_id, provider, utcnow()),
+                (event_id, provider, ts),
             )
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SUPABASE RECOVERY
+# ─────────────────────────────────────────────────────────────────────
+def restore_from_supabase() -> int:
+    """Hydrate an empty local SQLite database from the Supabase mirror."""
+    local_users = connection().execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if local_users > 0:
+        return 0
+    try:
+        import supabase_backend
+    except Exception:
+        return 0
+    if not supabase_backend.is_configured():
+        return 0
+
+    snapshot = supabase_backend.fetch_bootstrap_snapshot()
+    users = snapshot.get("users") or []
+    if not users:
+        return 0
+
+    with suspend_remote_sync():
+        with transaction() as conn:
+            for user in users:
+                conn.execute(
+                    """INSERT OR IGNORE INTO users (email, name, pw_hash, plan, tokens, flagged,
+                                                  flag_reason, platform_api_key, traakteer_id,
+                                                  stripe_customer_id, stripe_subscription_id,
+                                                  created_at, updated_at, last_reset)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        user.get("email"), user.get("name", ""), user.get("pw_hash", ""),
+                        user.get("plan", "starter"), int(user.get("tokens", 0)),
+                        int(bool(user.get("flagged"))), user.get("flag_reason", "") or "",
+                        user.get("platform_api_key"), user.get("traakteer_id", "") or "",
+                        user.get("stripe_customer_id"), user.get("stripe_subscription_id"),
+                        str(user.get("created") or utcnow()),
+                        str(user.get("updated") or user.get("created") or utcnow()),
+                        str(user.get("last_reset") or user.get("created") or utcnow()),
+                    ),
+                )
+
+            for item in snapshot.get("api_keys") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO api_keys
+                       (user_email, label, key_value, uses, last_used, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        item.get("user_email"), item.get("label", ""), item.get("key_value", ""),
+                        int(item.get("uses", 0)), item.get("last_used"),
+                        str(item.get("created_at") or utcnow()),
+                    ),
+                )
+
+            for dataset in snapshot.get("datasets") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO datasets
+                       (id, owner, name, description, rows_json, row_count, public, tags_json,
+                        downloads, likes, storage_backend, storage_repo, storage_path,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        dataset.get("id"), dataset.get("owner"), dataset.get("name", "Untitled"),
+                        dataset.get("description", ""), json.dumps(dataset.get("rows") or []),
+                        int(dataset.get("row_count", 0)), int(bool(dataset.get("public"))),
+                        json.dumps(dataset.get("tags") or []), int(dataset.get("downloads", 0)),
+                        int(dataset.get("likes", 0)), dataset.get("storage_backend", "local"),
+                        dataset.get("storage_repo"), dataset.get("storage_path"),
+                        str(dataset.get("created") or utcnow()),
+                        str(dataset.get("updated") or dataset.get("created") or utcnow()),
+                    ),
+                )
+
+            for model in snapshot.get("models") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO models
+                       (id, owner, name, description, base_model, hf_repo, public, tags_json,
+                        status, downloads, likes, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        model.get("id"), model.get("owner"), model.get("name", "Untitled"),
+                        model.get("description", ""), model.get("base_model", ""),
+                        model.get("hf_repo", ""), int(bool(model.get("public"))),
+                        json.dumps(model.get("tags") or []), model.get("status", "ready"),
+                        int(model.get("downloads", 0)), int(model.get("likes", 0)),
+                        str(model.get("created") or utcnow()),
+                        str(model.get("updated") or model.get("created") or utcnow()),
+                    ),
+                )
+
+            for ticket in snapshot.get("support_tickets") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO support_tickets
+                       (id, user_email, subject, message, status, admin_reply, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        ticket.get("id"), ticket.get("user_email"), ticket.get("subject", ""),
+                        ticket.get("message", ""), ticket.get("status", "open"),
+                        ticket.get("admin_reply", ""), str(ticket.get("created_at") or utcnow()),
+                    ),
+                )
+
+            for entry in snapshot.get("token_logs") or []:
+                conn.execute(
+                    """INSERT INTO token_logs (user_email, delta, reason, balance, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        entry.get("user_email"), int(entry.get("delta", 0)),
+                        entry.get("reason", ""), int(entry.get("balance", 0)),
+                        str(entry.get("created_at") or utcnow()),
+                    ),
+                )
+
+            for event in snapshot.get("billing_events") or []:
+                conn.execute(
+                    """INSERT INTO billing_events (user_email, event_type, details, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        event.get("user_email"), event.get("event_type", ""),
+                        json.dumps(event.get("details") or {}),
+                        str(event.get("created_at") or utcnow()),
+                    ),
+                )
+
+            for session in snapshot.get("auth_sessions") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO auth_sessions
+                       (token_hash, user_email, created_at, expires_at, last_seen_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        session.get("token_hash"),
+                        session.get("user_email"),
+                        str(session.get("created_at") or utcnow()),
+                        str(session.get("expires_at") or utcnow()),
+                        str(session.get("last_seen_at") or session.get("created_at") or utcnow()),
+                    ),
+                )
+
+            announcement = snapshot.get("announcement") or None
+            if isinstance(announcement, dict):
+                conn.execute(
+                    """INSERT OR REPLACE INTO announcements
+                       (id, message, author, active, created_at, updated_at)
+                       VALUES (1, ?, ?, ?, ?, ?)""",
+                    (
+                        announcement.get("message", ""),
+                        announcement.get("author", ""),
+                        int(bool(announcement.get("active"))),
+                        str(announcement.get("created_at") or utcnow()),
+                        str(announcement.get("updated_at") or announcement.get("created_at") or utcnow()),
+                    ),
+                )
+    return len(users)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -832,6 +1513,9 @@ def migrate_legacy_json(path: Path | None = None) -> int:
         except sqlite3.IntegrityError:
             continue
         imported += 1
+        _mirror_user(email)
+        for label, _info in (user.get("api_keys") or {}).items():
+            _mirror_api_key(email, str(label))
 
     for did, ds in (legacy.get("datasets") or {}).items():
         owner = str(ds.get("owner", "")).strip().lower()

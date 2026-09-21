@@ -7,19 +7,26 @@ layer so it holds no matter which surface triggers it.
 """
 from __future__ import annotations
 
+import io
 import json
+import zipfile
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import billing
+import config
 import core
 import inference
 import store
+import supabase_backend
+import supabase_memory
 import ui
 from config import (
-    ADMIN_EMAIL, APP_ICON, APP_NAME, PLANS, TOKENS_PER_ROW,
-    USING_DEFAULT_SECRET, display_limit, is_admin, plan_for,
+    APP_ICON, APP_NAME, AUTH_COOKIE_NAME, AUTH_SESSION_DAYS, PLANS,
+    TOKENS_PER_ROW, USING_DEFAULT_SECRET, display_limit, is_admin, plan_for,
 )
 from ui import esc
 
@@ -33,11 +40,129 @@ ui.inject_css()
 core.bootstrap()
 
 SESSION_EMAIL = "user_email"
+AUTH_COOKIE_SET_KEY = "_auth_cookie_to_set"
+AUTH_COOKIE_CLEAR_KEY = "_auth_cookie_to_clear"
+HERO_IMAGE_CANDIDATES = (
+    Path("assets/home-hero.png"),
+    Path("assets/home-hero.jpg"),
+    Path("assets/home-hero.jpeg"),
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
 # SHARED HELPERS
 # ─────────────────────────────────────────────────────────────────────
+def _auth_cookie() -> str:
+    try:
+        cookies = st.context.cookies
+        value = cookies.get(AUTH_COOKIE_NAME, "") if cookies else ""
+    except Exception:
+        value = ""
+    return str(value or "").strip()
+
+
+
+def _queue_auth_cookie(token: str) -> None:
+    token = (token or "").strip()
+    if token:
+        st.session_state[AUTH_COOKIE_SET_KEY] = token
+
+
+
+def _queue_auth_cookie_clear() -> None:
+    st.session_state[AUTH_COOKIE_CLEAR_KEY] = True
+
+
+
+def _render_auth_cookie_updates() -> None:
+    token = st.session_state.pop(AUTH_COOKIE_SET_KEY, "")
+    clear = bool(st.session_state.pop(AUTH_COOKIE_CLEAR_KEY, False))
+    if not token and not clear:
+        return
+    max_age = max(1, int(AUTH_SESSION_DAYS)) * 24 * 60 * 60
+    statements: list[str] = []
+    if clear:
+        statements.append(
+            "for (const target of cookieTargets) {"
+            "  target.cookie = `${cookieName}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; "
+            "Max-Age=0; Path=/; SameSite=Lax${secure}`;"
+            "}"
+        )
+    if token:
+        statements.append(
+            f"for (const target of cookieTargets) {{"
+            f"  target.cookie = `${{cookieName}}=${{encodeURIComponent({json.dumps(token)})}}; "
+            f"Max-Age={max_age}; Path=/; SameSite=Lax${{secure}}`;"
+            f"}}"
+        )
+    script = "\n".join([
+        "<script>",
+        f"const cookieName = {json.dumps(AUTH_COOKIE_NAME)};",
+        "const secure = window.location.protocol === 'https:' ? '; Secure' : '';",
+        "const cookieTargets = [document];",
+        "try { if (window.parent && window.parent.document) { cookieTargets.push(window.parent.document); } } catch (error) {}",
+        *statements,
+        "</script>",
+    ])
+    components.html(script, height=0, width=0)
+
+
+
+def _restore_sign_in() -> bool:
+    if st.session_state.get(SESSION_EMAIL):
+        return True
+    token = _auth_cookie()
+    if not token:
+        return False
+    user = core.authenticate_persistent_session(token)
+    if not user:
+        _queue_auth_cookie_clear()
+        return False
+    st.session_state[SESSION_EMAIL] = user["email"]
+    _queue_auth_cookie(token)
+    return True
+
+
+
+def _sign_out(message: str | None = None) -> None:
+    core.revoke_persistent_session(_auth_cookie())
+    st.session_state.clear()
+    if message:
+        st.session_state["auth_notice"] = message
+    _queue_auth_cookie_clear()
+
+
+
+def _build_zip_archive(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path, content in files.items():
+            archive.writestr(path, content)
+    return buffer.getvalue()
+
+
+
+def _home_hero_image() -> Path | None:
+    for path in HERO_IMAGE_CANDIDATES:
+        if path.exists():
+            return path
+    return None
+
+
+def _render_announcement_banner() -> None:
+    announcement = store.get_announcement()
+    if not announcement or not announcement.get("active") or not announcement.get("message"):
+        return
+    author = announcement.get("author") or "Admin"
+    message = esc(announcement.get("message", "")).replace("\n", "<br>")
+    st.markdown(
+        '<div class="admin-bar">'
+        f'📣 Announcement · {esc(author)}<br>{message}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _limit_warning(user: dict, kind: str) -> None:
     plan = plan_for(user["plan"])
     st.markdown(
@@ -79,14 +204,223 @@ def _download_buttons(dataset_id: str, rows: list[dict], key_prefix: str = "") -
         )
 
 
-def _run_inference(repo: str, prompt: str, email: str, output_key: str) -> None:
+def _model_token(user: dict | None) -> str | None:
+    return core.resolve_model_token(user or {}) if user else None
+
+
+def _memory_enabled() -> bool:
+    return supabase_memory.is_configured()
+
+
+def _memory_status_text() -> str:
+    if _memory_enabled():
+        return "🧠 Saved memory is on"
+    return "🧠 Saved memory is off"
+
+
+def _tone(ok: bool, *, warn: bool = True) -> str:
+    if ok:
+        return "ok"
+    return "warn" if warn else "off"
+
+
+def _diagnostic_snapshot(user: dict) -> tuple[list[dict], list[dict]]:
+    stats = core.usage(user)
+    plan = stats["plan"]
+    dataset_remaining = max(0, plan["max_datasets"] - stats["datasets"])
+    model_remaining = max(0, plan["max_models"] - stats["models"])
+
+    user_token = bool(_model_token(user))
+    deployment_token = bool(config.MODEL_PROVIDER_TOKEN or config.HF_TOKEN)
+    chat_ready = user_token or deployment_token
+    storage_ok, storage_message = core.storage_status()
+    memory_ok, memory_message = supabase_memory.memory_diagnostic()
+    backend_ok, backend_message = supabase_backend.health_diagnostic()
+    billing_ready = billing.stripe_available() or billing.traakteer_available()
+    platform_key_ready = bool(user.get("platform_api_key"))
+    secret_ready = not USING_DEFAULT_SECRET
+
+    cards = [
+        {
+            "kicker": "Access",
+            "title": "Chat & Generation",
+            "state": "Live" if chat_ready else "Fallback",
+            "tone": _tone(chat_ready, warn=False),
+            "detail": (
+                "Dataset generation and live chat inference are ready."
+                if chat_ready else
+                "The assistant stays available with built-in offline answers until a token is connected."
+            ),
+            "meta": (
+                "Using your saved registry token first."
+                if user_token else
+                "Using the deployment model token."
+                if deployment_token else
+                "No model token detected."
+            ),
+        },
+        {
+            "kicker": "Storage",
+            "title": "Managed Mirror",
+            "state": "Connected" if storage_ok else "Local only",
+            "tone": _tone(storage_ok, warn=False),
+            "detail": storage_message,
+            "meta": "Datasets still save locally even when the mirror is unavailable.",
+        },
+        {
+            "kicker": "Memory",
+            "title": "Persistent Chat",
+            "state": "Connected" if memory_ok else "Session only",
+            "tone": _tone(memory_ok, warn=False),
+            "detail": memory_message,
+            "meta": "Backed by Supabase when configured.",
+        },
+        {
+            "kicker": "Backend",
+            "title": "Supabase Mirror",
+            "state": "Connected" if backend_ok else "Local only",
+            "tone": _tone(backend_ok, warn=False),
+            "detail": backend_message,
+            "meta": "Critical app tables can be mirrored there for recovery.",
+        },
+        {
+            "kicker": "Security",
+            "title": "Workspace Access",
+            "state": "Ready" if platform_key_ready else "Missing key",
+            "tone": _tone(platform_key_ready),
+            "detail": (
+                "Your personal asi- key is generated and ready for scripts or Colab."
+                if platform_key_ready else
+                "Generate your asi- key in API Keys to call the platform from code."
+            ),
+            "meta": (
+                "Deployment secret key is secure."
+                if secret_ready else
+                "Admin should replace the default deployment secret key."
+            ),
+        },
+        {
+            "kicker": "Billing",
+            "title": "Upgrade Checkout",
+            "state": "Enabled" if billing_ready else "Disabled",
+            "tone": _tone(billing_ready, warn=False),
+            "detail": (
+                "At least one payment provider is configured."
+                if billing_ready else
+                "Paid plan checkout is disabled on this deployment right now."
+            ),
+            "meta": (
+                "Stripe or Traakteer is available."
+                if billing_ready else
+                "Starter still works fully without billing."
+            ),
+        },
+        {
+            "kicker": "Capacity",
+            "title": "Dataset Slots",
+            "state": f"{dataset_remaining} left",
+            "tone": "ok" if dataset_remaining > 0 else "warn",
+            "detail": (
+                f"You are using **{stats['datasets']}** of **{display_limit(plan['max_datasets'])}** dataset slots."
+            ),
+            "meta": f"Current plan: {plan['badge']} {plan['name']}",
+        },
+        {
+            "kicker": "Capacity",
+            "title": "Model Slots",
+            "state": f"{model_remaining} left",
+            "tone": "ok" if model_remaining > 0 else "warn",
+            "detail": (
+                f"You are using **{stats['models']}** of **{display_limit(plan['max_models'])}** model slots."
+            ),
+            "meta": f"Saved API keys: {stats['api_keys']} · Tokens: {stats['tokens']:,}",
+        },
+    ]
+
+    rows = [
+        {
+            "label": "User registry token",
+            "detail": (
+                "A saved third-party token is available and will be preferred for model operations."
+                if user_token else
+                "No saved registry token found in your API Keys."
+            ),
+            "meta": "present" if user_token else "absent",
+            "tone": _tone(user_token, warn=False),
+        },
+        {
+            "label": "Deployment model token",
+            "detail": (
+                "The deployment has a managed token configured."
+                if deployment_token else
+                "No deployment model token is configured."
+            ),
+            "meta": "present" if deployment_token else "absent",
+            "tone": _tone(deployment_token, warn=False),
+        },
+        {
+            "label": "Supabase backend mirror",
+            "detail": backend_message,
+            "meta": "connected" if backend_ok else "inactive",
+            "tone": _tone(backend_ok, warn=False),
+        },
+        {
+            "label": "Public URL",
+            "detail": f"Current app URL: `{config.PUBLIC_URL}`",
+            "meta": "route",
+            "tone": "off",
+        },
+        {
+            "label": "Data directory",
+            "detail": f"Local persistence path: `{config.DATA_DIR}`",
+            "meta": "storage",
+            "tone": "off",
+        },
+    ]
+    return cards, rows
+
+
+def _remember(email: str, message: dict) -> None:
+    try:
+        supabase_memory.append_message(
+            email,
+            message.get("role", ""),
+            message.get("content", ""),
+            message.get("offer"),
+        )
+    except Exception:
+        pass
+
+
+def _load_chat(user: dict) -> list[dict]:
+    try:
+        remembered = supabase_memory.load_chat_history(user["email"], limit=80)
+    except Exception:
+        remembered = []
+    return remembered or [{"role": "bot", "content": _greeting(user)}]
+
+
+def _clear_chat_memory(user: dict) -> None:
+    try:
+        supabase_memory.clear_chat_history(user["email"])
+    except Exception:
+        pass
+    st.session_state["chat"] = [{"role": "bot", "content": _greeting(user)}]
+    st.session_state["pending_dataset"] = None
+    st.session_state["pending_notebook"] = None
+    st.session_state["chat_pending"] = False
+    st.rerun()
+
+
+def _run_inference(repo: str, user: dict, output_key: str, prompt: str) -> None:
     """Shared 'try this model' handler with rate limiting and typed errors."""
+    email = user["email"]
     if not core.rate_limit(email, "inference"):
         st.error("Rate limit reached — 5 inference calls per minute.")
         return
     try:
         with st.spinner("Running…"):
-            output = inference.call_hf(repo, prompt)
+            output = inference.call_hf(repo, prompt, hf_token=_model_token(user))
     except inference.ModelLoadingError as exc:
         st.warning(str(exc))
     except inference.InferenceError as exc:
@@ -99,12 +433,17 @@ def _run_inference(repo: str, prompt: str, email: str, output_key: str) -> None:
 # AUTH
 # ─────────────────────────────────────────────────────────────────────
 def page_auth() -> None:
+    _render_auth_cookie_updates()
+    notice = st.session_state.pop("auth_notice", "")
+    if notice:
+        st.success(notice)
     st.markdown(
         '<div class="hero">'
         '<div class="badge">BETA · YOUR OWN AI PLATFORM</div>'
         f"<h1>{APP_ICON} {esc(APP_NAME)}</h1>"
         "<p>Build AI datasets with a chatbot · Fine-tune models · Share with the "
-        "community.<br>Like Hugging Face — but yours. No Hugging Face account needed.</p>"
+        "community.<br>Like a private AI hub — but yours. No separate registry account "
+        "needed to get started.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -124,11 +463,22 @@ def page_auth() -> None:
             with st.form("login_form"):
                 email = st.text_input("Email", placeholder="you@example.com")
                 password = st.text_input("Password", type="password")
+                remember_me = st.checkbox(
+                    "Keep me signed in on this device",
+                    value=True,
+                    help=f"Saves your login in this browser for up to {AUTH_SESSION_DAYS} days.",
+                )
                 submitted = st.form_submit_button("Sign in →", use_container_width=True, type="primary")
             if submitted:
                 ok, message, user = core.login(email, password)
                 if ok and user:
                     st.session_state[SESSION_EMAIL] = user["email"]
+                    if remember_me:
+                        token = core.create_persistent_session(user["email"])
+                        if token:
+                            _queue_auth_cookie(token)
+                    else:
+                        _queue_auth_cookie_clear()
                     st.rerun()
                 else:
                     st.error(message)
@@ -167,8 +517,39 @@ def page_home(user: dict) -> None:
     stats = core.usage(user)
     plan = stats["plan"]
     first_name = (user.get("name") or "there").split()[0]
-    ui.hero(f"Welcome back, {first_name} {plan['badge']}",
-            "Your AI workspace — create, train and share")
+    hero_image = _home_hero_image()
+
+    if hero_image:
+        left, right = st.columns([1.5, 1], gap="large")
+        with left:
+            ui.hero(
+                f"Welcome back, {first_name} {plan['badge']}",
+                "Your AI workspace — create, train and share",
+                badge="AURA",
+            )
+        with right:
+            st.image(str(hero_image), use_container_width=True)
+    else:
+        ui.hero(f"Welcome back, {first_name} {plan['badge']}",
+                "Your AI workspace — create, train and share")
+
+    quick1, quick2, quick3, quick4 = st.columns(4)
+    with quick1:
+        if st.button("🧪 Open Diagnostics", use_container_width=True):
+            ui.go_to("🧪  Diagnostics")
+            st.rerun()
+    with quick2:
+        if st.button("💬 Open Dataset Chat", use_container_width=True):
+            ui.go_to("💬  Dataset Chat")
+            st.rerun()
+    with quick3:
+        if st.button("🤖 Open My Models", use_container_width=True):
+            ui.go_to("🤖  My Models")
+            st.rerun()
+    with quick4:
+        if st.button("🛰️ Open Apps", use_container_width=True):
+            ui.go_to("🛰️  Apps")
+            st.rerun()
 
     columns = st.columns(4)
     tiles = [
@@ -222,6 +603,86 @@ def page_home(user: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# DIAGNOSTICS
+# ─────────────────────────────────────────────────────────────────────
+def page_diagnostics(user: dict) -> None:
+    ui.hero("🧪 Diagnostics", "Live health, access, memory and storage signals", badge="AURA")
+
+    cards, rows = _diagnostic_snapshot(user)
+    st.markdown(ui.diagnostic_grid(cards), unsafe_allow_html=True)
+
+    pills = "".join([
+        ui.status_pill("chat live" if cards[0]["tone"] == "ok" else "chat fallback", cards[0]["tone"]),
+        ui.status_pill("storage mirror" if cards[1]["tone"] == "ok" else "local storage", cards[1]["tone"]),
+        ui.status_pill("memory on" if cards[2]["tone"] == "ok" else "memory off", cards[2]["tone"]),
+        ui.status_pill("backend mirror" if cards[3]["tone"] == "ok" else "backend local", cards[3]["tone"]),
+        ui.status_pill("checkout on" if cards[5]["tone"] == "ok" else "checkout off", cards[5]["tone"]),
+    ])
+    st.markdown(f'<div class="aura-strip">{pills}</div>', unsafe_allow_html=True)
+
+    left, right = st.columns([1.15, 1], gap="large")
+    with left:
+        st.markdown("### Current signals")
+        st.markdown(ui.diagnostic_rows(rows), unsafe_allow_html=True)
+
+        recent_datasets = store.user_datasets(user["email"], with_rows=False)[:5]
+        st.markdown("### Dataset telemetry")
+        if recent_datasets:
+            dataset_frame = pd.DataFrame([
+                {
+                    "name": dataset["name"],
+                    "rows": dataset["row_count"],
+                    "visibility": "public" if dataset["public"] else "private",
+                    "storage": dataset.get("storage_backend") or "local",
+                    "updated": dataset["updated"][:19],
+                }
+                for dataset in recent_datasets
+            ])
+            st.dataframe(dataset_frame, use_container_width=True, hide_index=True)
+        else:
+            ui.note("No datasets yet — generate one in Dataset Chat to see storage telemetry.")
+
+    with right:
+        st.markdown("### Model telemetry")
+        recent_models = store.user_models(user["email"])[:5]
+        if recent_models:
+            model_frame = pd.DataFrame([
+                {
+                    "name": model["name"],
+                    "base": model["base_model"],
+                    "target": model["hf_repo"] or "not set",
+                    "visibility": "public" if model["public"] else "private",
+                    "updated": model["updated"][:19],
+                }
+                for model in recent_models
+            ])
+            st.dataframe(model_frame, use_container_width=True, hide_index=True)
+        else:
+            ui.note("No models yet — create one in My Models to see output targets.")
+
+        stats = core.usage(user)
+        ui.card(
+            "<div class=\"stat-lbl\">Workspace summary</div>"
+            f"<div class=\"stat-num\">{stats['tokens']:,}</div>"
+            "<div style=\"color:var(--txt2);font-size:.87rem;line-height:1.7;margin-top:.45rem\">"
+            f"Datasets: <b>{stats['datasets']}</b><br>"
+            f"Models: <b>{stats['models']}</b><br>"
+            f"Stored keys: <b>{stats['api_keys']}</b>"
+            "</div>",
+            glow=True,
+        )
+
+        controls_col, refresh_col = st.columns(2)
+        with controls_col:
+            if st.button("🔑 Open API Keys", use_container_width=True):
+                ui.go_to("🔑  API Keys")
+                st.rerun()
+        with refresh_col:
+            if st.button("↻ Refresh", use_container_width=True):
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # DATASET CHAT
 # ─────────────────────────────────────────────────────────────────────
 CONVERSATION_STARTERS = [
@@ -229,7 +690,7 @@ CONVERSATION_STARTERS = [
     "Generate 50 customer reviews for a coffee shop",
     "How does LoRA fine-tuning actually work?",
     "Build 100 Q&A pairs about Python",
-    "How many rows do I need to fine-tune?",
+    "Make me a Colab notebook to train a sentiment model",
     "Make 40 spam vs not-spam examples",
 ]
 
@@ -238,8 +699,8 @@ def _greeting(user: dict) -> str:
     first_name = (user.get("name") or "there").split()[0]
     return (
         f"Hi {first_name} — I'm Asian.\n\n"
-        "Ask me anything about machine learning, datasets or training. When you "
-        "want data, just describe it and I'll generate it for you.\n\n"
+        "Ask me anything about machine learning, datasets or training. I can teach, "
+        "help you make datasets, and prepare a Colab `.ipynb` notebook for model training.\n\n"
         f"You have **{user['tokens']:,} tokens** ({TOKENS_PER_ROW} per row)."
     )
 
@@ -257,6 +718,12 @@ def _provisional_offer(message: str) -> dict | None:
 
 def _queue_generation(user: dict, spec: dict) -> str:
     """Open the generation form for `spec` and return what the assistant says."""
+    if core.at_limit(user, "datasets"):
+        return (
+            "I can help you design the dataset, but your dataset slots are full right now.\n\n"
+            "Delete one from Dataset Hub or upgrade your plan, then I can generate it for you."
+        )
+
     plan = plan_for(user["plan"])
     rows = max(1, min(int(spec.get("rows") or 20), plan["max_rows"]))
     columns = spec.get("columns") or ["input", "output"]
@@ -277,6 +744,47 @@ def _queue_generation(user: dict, spec: dict) -> str:
     )
 
 
+def _default_notebook_dataset(user: dict) -> str:
+    preferred = st.session_state.get("last_id")
+    if preferred and store.get_dataset(preferred):
+        return preferred
+    datasets = store.user_datasets(user["email"], with_rows=False)
+    return datasets[0]["id"] if datasets else ""
+
+
+def _queue_notebook(user: dict, spec: dict) -> str:
+    """Open the notebook builder and return what the assistant says."""
+    if core.at_limit(user, "models"):
+        return (
+            "I can help you plan the training notebook, but your model slots are full right now.\n\n"
+            "Delete one from My Models or upgrade your plan, then I can prepare the `.ipynb`."
+        )
+
+    dataset_id = _default_notebook_dataset(user)
+    st.session_state["pending_notebook"] = {
+        "name": spec.get("name") or "My Model",
+        "description": "",
+        "base_model": spec.get("base_model") or POPULAR_BASE_MODELS[0],
+        "target_repo": "",
+        "dataset_id": dataset_id,
+        "epochs": 3,
+        "learning_rate": "2e-4",
+        "max_length": 512,
+        "batch_size": 4,
+        "tags": "",
+        "public": False,
+    }
+    if dataset_id:
+        return (
+            "Absolutely — I opened the training notebook form below.\n\n"
+            "Pick the dataset and base model you want, then press **Generate notebook** and I'll make the `.ipynb` for you."
+        )
+    return (
+        "Absolutely — I opened the training notebook form below.\n\n"
+        "You can still create the notebook now, but training works best once you've generated or selected a dataset."
+    )
+
+
 def _take_turn(user: dict) -> None:
     """Produce the assistant's reply to the last message.
 
@@ -287,39 +795,55 @@ def _take_turn(user: dict) -> None:
     message = conversation[-1]["content"]
     history = conversation[:-1]
 
-    intent = inference.detect_dataset_intent(message, history)
-    if intent:
-        reply, offer = _queue_generation(user, intent), None
+    dataset_intent = inference.detect_dataset_intent(message, history)
+    notebook_intent = inference.detect_notebook_intent(message)
+    if notebook_intent:
+        reply, offer = _queue_notebook(user, notebook_intent), None
+    elif dataset_intent:
+        reply, offer = _queue_generation(user, dataset_intent), None
     else:
-        reply = inference.chat_response(message, history)
+        reply = inference.chat_response(message, history, user_hf_token=_model_token(user))
         offer = _provisional_offer(message)
         if offer:
             reply += "\n\nWant me to build that? Just say the word."
 
-    conversation.append({"role": "bot", "content": reply, "offer": offer})
+    assistant_message = {"role": "bot", "content": reply, "offer": offer}
+    conversation.append(assistant_message)
+    _remember(user["email"], assistant_message)
     st.session_state["chat_pending"] = False
     st.rerun()
 
 
-def _send(message: str) -> None:
+def _send(user: dict, message: str) -> None:
     """Record the person's message and hand the turn to the assistant."""
-    st.session_state["chat"].append({"role": "user", "content": message[:2000]})
+    user_message = {"role": "user", "content": message[:2000]}
+    st.session_state["chat"].append(user_message)
+    _remember(user["email"], user_message)
     st.session_state["chat_pending"] = True
     st.rerun()
 
 
 def page_dataset_chat(user: dict) -> None:
     plan = plan_for(user["plan"])
-    ui.hero("Dataset Chat", "Talk it through — then let me build the data")
+    ui.hero("Dataset Chat", "Learn naturally — then let me build the dataset or notebook")
 
     if core.at_limit(user, "datasets"):
         _limit_warning(user, "datasets")
-        return
+    if core.at_limit(user, "models"):
+        _limit_warning(user, "models")
 
     if "chat" not in st.session_state:
-        st.session_state["chat"] = [{"role": "bot", "content": _greeting(user)}]
+        st.session_state["chat"] = _load_chat(user)
     st.session_state.setdefault("pending_dataset", None)
+    st.session_state.setdefault("pending_notebook", None)
     st.session_state.setdefault("chat_pending", False)
+
+    tools_col, status_col = st.columns([1, 1])
+    with tools_col:
+        if _memory_enabled() and st.button("🧹 Clear saved chat", use_container_width=True):
+            _clear_chat_memory(user)
+    with status_col:
+        st.caption(_memory_status_text())
 
     pending = st.session_state["chat_pending"]
     st.markdown(
@@ -334,6 +858,8 @@ def page_dataset_chat(user: dict) -> None:
 
     if st.session_state["pending_dataset"]:
         _render_generation_form(user, plan)
+    if st.session_state["pending_notebook"]:
+        _render_chat_notebook_form(user, plan)
 
     if st.session_state.get("last_rows"):
         with st.expander(f"⬇ Download — {st.session_state.get('last_name', 'last dataset')}"):
@@ -341,6 +867,9 @@ def page_dataset_chat(user: dict) -> None:
                          use_container_width=True)
             _download_buttons(st.session_state.get("last_id", "dataset"),
                               st.session_state["last_rows"], key_prefix="last")
+
+    if st.session_state.get("notebook_json"):
+        _render_notebook_download()
 
     with st.form("chat_input", clear_on_submit=True):
         message_column, send_column = st.columns([6, 1])
@@ -350,7 +879,7 @@ def page_dataset_chat(user: dict) -> None:
         with send_column:
             send = st.form_submit_button("Send", use_container_width=True, type="primary")
     if send and message.strip():
-        _send(message.strip())
+        _send(user, message.strip())
 
     # Openers are only useful before the conversation has a direction.
     if len(st.session_state["chat"]) <= 1:
@@ -360,7 +889,7 @@ def page_dataset_chat(user: dict) -> None:
         for index, prompt in enumerate(CONVERSATION_STARTERS):
             with left if index % 2 == 0 else right:
                 if st.button(prompt, key=f"starter_{index}", use_container_width=True):
-                    _send(prompt)
+                    _send(user, prompt)
 
 
 def _render_generation_form(user: dict, plan: dict) -> None:
@@ -413,6 +942,94 @@ def _render_generation_form(user: dict, plan: dict) -> None:
         )
 
 
+def _render_chat_notebook_form(user: dict, plan: dict) -> None:
+    info = st.session_state["pending_notebook"]
+    datasets = store.user_datasets(user["email"], with_rows=False)
+    options = ["— none (zero-shot) —"] + [f"{d['name']} ({d['row_count']} rows)" for d in datasets]
+
+    selected_option = options[0]
+    for dataset, label in zip(datasets, options[1:]):
+        if dataset["id"] == info.get("dataset_id"):
+            selected_option = label
+            break
+
+    ui.divider()
+    st.markdown("### ✦ Ready to prepare the notebook")
+    left, right = st.columns([2, 1])
+
+    with left:
+        with st.form("chat_notebook_form"):
+            name = st.text_input("Model name", value=info.get("name", "My Model"))
+            description = st.text_area("Description", value=info.get("description", ""), height=70)
+            base_model = st.text_input("Base model", value=info.get("base_model") or POPULAR_BASE_MODELS[0])
+            target_repo = st.text_input(
+                "Target model path (optional)",
+                value=info.get("target_repo", ""),
+                placeholder="your-name/my-model",
+            )
+            selection = st.selectbox(
+                "Train on dataset",
+                options,
+                index=options.index(selected_option) if selected_option in options else 0,
+            )
+
+            with st.expander("⚙️ Training settings"):
+                epochs = st.slider("Epochs", 1, 10, int(info.get("epochs") or 3), key="chat_epochs")
+                learning_rate = st.select_slider(
+                    "Learning rate", ["5e-5", "2e-4", "5e-4", "1e-3"],
+                    value=str(info.get("learning_rate") or "2e-4"), key="chat_lr",
+                )
+                max_length = st.select_slider(
+                    "Max sequence length", [128, 256, 512, 1024],
+                    value=int(info.get("max_length") or 512), key="chat_max_length",
+                )
+                batch_size = st.select_slider(
+                    "Batch size", [1, 2, 4, 8],
+                    value=int(info.get("batch_size") or 4), key="chat_batch_size",
+                )
+
+            tags_raw = st.text_input("Tags", value=info.get("tags", ""), placeholder="nlp, tutorial")
+            public = st.checkbox(
+                "Share publicly on the Model Hub",
+                value=bool(info.get("public")),
+                disabled=not plan["share"],
+                help="Pro and Elite only",
+                key="chat_model_public",
+            )
+            create_col, cancel_col = st.columns(2)
+            with create_col:
+                generate = st.form_submit_button(
+                    "✦ Generate notebook", use_container_width=True, type="primary"
+                )
+            with cancel_col:
+                cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+        if cancel:
+            st.session_state["pending_notebook"] = None
+            st.rerun()
+
+        if generate:
+            _create_model(
+                user, name, description, base_model, target_repo, selection, options,
+                datasets, tags_raw, public, epochs, learning_rate, max_length,
+                batch_size, from_chat=True,
+            )
+
+    with right:
+        dataset_note = "Zero-shot" if selected_option == options[0] else selected_option
+        st.markdown(
+            '<div class="card">'
+            '<div class="stat-lbl">Notebook plan</div>'
+            f'<div style="font-weight:650;margin:.45rem 0;color:var(--txt)">{esc(dataset_note)}</div>'
+            f'<div style="font-size:.82rem;color:var(--txt2)">Base model:<br><b>{esc(info.get("base_model") or POPULAR_BASE_MODELS[0])}</b></div>'
+            '<div style="font-size:.8rem;color:var(--txt3);margin-top:.7rem">'
+            'The generated file is a real `.ipynb` you can download and run in Colab.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+
+
 def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
                       row_count: int, style: str, tags_raw: str, public: bool,
                       topic: str) -> None:
@@ -435,11 +1052,13 @@ def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
         return
 
     progress = st.progress(0.0, "Starting…")
+    provider_token = _model_token(user)
     try:
         rows = inference.generate_rows(
             topic or name, columns, style, row_count,
             progress_cb=lambda done, total: progress.progress(
                 done / total, f"Generated {done} of {total} rows…"),
+            user_hf_token=provider_token,
         )
     except inference.ModelLoadingError as exc:
         st.warning(f"{exc} No tokens were used.")
@@ -457,8 +1076,10 @@ def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
 
     try:
         with st.status("Saving…", expanded=False) as status:
-            dataset_id = core.create_dataset(user["email"], name, description,
-                                             rows, public, tags)
+            dataset_id = core.create_dataset(
+                user["email"], name, description, rows, public, tags,
+                provider_token=provider_token,
+            )
             status.update(label="Dataset saved", state="complete")
     except (core.PlanLimitError, core.StorageUnavailableError, ValueError) as exc:
         core.refund_tokens(user["email"], cost, "refund:save_failed")
@@ -469,14 +1090,17 @@ def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
     st.session_state["last_rows"] = rows
     st.session_state["last_id"] = dataset_id
     st.session_state["last_name"] = name
-    st.session_state["chat"].append({
+    assistant_message = {
         "role": "bot",
         "content": (
             f"✅ Done — **{name}** with {len(rows)} rows is saved to your account.\n\n"
             f"That used {cost:,} tokens; you have {balance:,} left.\n\n"
-            "Download it below, or find it in the Dataset Hub."
+            "Download it below, or find it in the Dataset Hub. If you want, I can also "
+            "prepare a training `.ipynb` notebook for this dataset."
         ),
-    })
+    }
+    st.session_state["chat"].append(assistant_message)
+    _remember(user["email"], assistant_message)
     st.rerun()
 
 
@@ -484,6 +1108,8 @@ def _generate_dataset(user: dict, name: str, description: str, columns_raw: str,
 # MY MODELS
 # ─────────────────────────────────────────────────────────────────────
 POPULAR_BASE_MODELS = [
+    "Hwiiiiiiii/gemby.v1",
+    "Hwiiiiiiii/gemby-plant",
     "Hwiiiiiiii/gemby-agent-3b",
     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     "microsoft/phi-2",
@@ -514,11 +1140,11 @@ def _render_model_form(user: dict, plan: dict) -> None:
         st.markdown(
             '<div class="card"><div style="font-weight:600;margin-bottom:.6rem">How it works</div>'
             '<div style="font-size:.83rem;color:var(--txt2);line-height:1.85">'
-            "1. Pick a base model from Hugging Face<br>"
+            "1. Pick a base model from the registry<br>"
             "2. Choose one of your datasets to train on<br>"
             "3. Download the generated <b>Colab notebook</b><br>"
             "4. Open it in Google Colab → <b>T4 GPU (free)</b><br>"
-            "5. Run all cells → weights push to the platform<br>"
+            "5. Run all cells → weights push to your target path<br>"
             "6. Your model becomes available for inference"
             "</div></div>",
             unsafe_allow_html=True,
@@ -540,8 +1166,16 @@ def _render_model_form(user: dict, plan: dict) -> None:
             name = st.text_input("Model name", placeholder="My Coffee Classifier")
             description = st.text_area("Description", height=70)
             base_model = st.text_input("Base model", value=POPULAR_BASE_MODELS[0])
-            st.caption("Your trained weights are stored by the platform — you don't "
-                       "need to manage a repository or token.")
+            target_repo = st.text_input(
+                "Target model path (optional)",
+                placeholder="your-name/my-coffee-classifier",
+                help=(
+                    "Leave blank to let the platform provision storage automatically. "
+                    "Fill this in if you want the notebook to publish to your own namespace."
+                ),
+            )
+            st.caption("Managed storage is automatic when the deployment or your saved "
+                       "registry token allows it.")
             selection = st.selectbox("Train on dataset", options)
 
             with st.expander("⚙️ Training settings"):
@@ -560,7 +1194,7 @@ def _render_model_form(user: dict, plan: dict) -> None:
                 type="primary")
 
         if submitted:
-            _create_model(user, name, description, base_model, selection, options,
+            _create_model(user, name, description, base_model, target_repo, selection, options,
                           datasets, tags_raw, public, epochs, learning_rate,
                           max_length, batch_size)
 
@@ -569,9 +1203,10 @@ def _render_model_form(user: dict, plan: dict) -> None:
 
 
 def _create_model(user: dict, name: str, description: str, base_model: str,
-                  selection: str, options: list[str], datasets: list[dict],
-                  tags_raw: str, public: bool, epochs: int, learning_rate: str,
-                  max_length: int, batch_size: int) -> None:
+                  target_repo: str, selection: str, options: list[str],
+                  datasets: list[dict], tags_raw: str, public: bool, epochs: int,
+                  learning_rate: str, max_length: int, batch_size: int,
+                  *, from_chat: bool = False) -> None:
     if not name.strip():
         st.error("Model name is required.")
         return
@@ -585,20 +1220,20 @@ def _create_model(user: dict, name: str, description: str, base_model: str,
         full = store.get_dataset(datasets[index]["id"])
         rows = full["rows"] if full else []
 
-    with st.spinner("Preparing secure model storage…"):
-        try:
-            import hf_storage
-
-            output_repo = hf_storage.make_model_repo(user["email"], name)
-        except Exception:
-            output_repo = None
+    provider_token = _model_token(user)
+    requested_repo = (target_repo or "").strip()
+    output_repo = requested_repo or None
+    if not output_repo:
+        with st.spinner("Preparing managed model storage…"):
+            output_repo = core.provision_model_repo(user["email"], name, provider_token)
 
     if not output_repo:
-        # Storage is a mirror, not a gate: fall back to a deterministic name so
-        # the notebook is still usable once a token is configured.
-        output_repo = f"asian-inference/{core.normalise_email(user['email']).split('@')[0]}-{name.strip().replace(' ', '-').lower()[:40]}"
-        st.info("Offsite storage isn't configured yet — the notebook will push to "
-                f"`{output_repo}` once you have Hub access.")
+        output_repo = core.suggested_model_repo(user["email"], name, provider_token)
+        st.info(
+            "Managed storage could not be provisioned automatically, so the notebook will "
+            f"target `{output_repo}`. Update it to a namespace you control before running "
+            "if needed."
+        )
 
     tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
     try:
@@ -613,6 +1248,19 @@ def _create_model(user: dict, name: str, description: str, base_model: str,
         max_length=max_length, batch_size=batch_size,
     )
     st.session_state["notebook_name"] = name
+    if from_chat:
+        st.session_state["pending_notebook"] = None
+        assistant_message = {
+            "role": "bot",
+            "content": (
+                f"✅ Your training notebook for **{name}** is ready.\n\n"
+                f"Base model: `{base_model}`\n"
+                f"Target path: `{output_repo}`\n\n"
+                "Download the `.ipynb` below and open it in Colab whenever you're ready."
+            ),
+        }
+        st.session_state["chat"].append(assistant_message)
+        _remember(user["email"], assistant_message)
     st.success(f"✅ **{name}** created. Download your Colab notebook below.")
     st.rerun()
 
@@ -624,8 +1272,8 @@ def _render_notebook_download() -> None:
         '<div class="note"><b>Steps:</b> download the notebook → open '
         '<a href="https://colab.research.google.com" target="_blank" rel="noopener">'
         "colab.research.google.com</a> → Upload → Runtime → Change runtime type → "
-        "<b>T4 GPU</b> → Run all. The notebook asks for your Hugging Face token when "
-        "it runs; it is never written into the file.</div>",
+        "<b>T4 GPU</b> → Run all. The notebook asks for your repository access token "
+        "when it runs; it is never written into the file.</div>",
         unsafe_allow_html=True,
     )
     filename = (st.session_state.get("notebook_name") or "model").replace(" ", "_")
@@ -664,8 +1312,10 @@ def _render_model_list(user: dict, plan: dict) -> None:
             with left:
                 prompt = st.text_area("Try a prompt", height=90, key=f"prompt_{model['id']}")
                 if st.button("▶ Run inference", key=f"run_{model['id']}"):
-                    _run_inference(model["hf_repo"] or model["base_model"], prompt,
-                                   user["email"], f"out_{model['id']}")
+                    _run_inference(
+                        model["hf_repo"] or model["base_model"], user,
+                        f"out_{model['id']}", prompt,
+                    )
             with right:
                 public = st.checkbox("Public", value=model["public"],
                                      key=f"public_{model['id']}",
@@ -680,6 +1330,128 @@ def _render_model_list(user: dict, plan: dict) -> None:
                     ok, message = core.delete_model(model["id"], user["email"])
                     st.toast(message, icon="✅" if ok else "⚠️")
                     st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SPACE / APP
+# ─────────────────────────────────────────────────────────────────────
+def page_space_app(user: dict) -> None:
+    gpu_target = inference.modal_gpu_for_plan(user.get("plan", "starter"))
+    ui.hero(
+        "🛰️ Apps",
+        "Build app starters, export GitHub-ready bundles, and connect heavy workloads to Modal GPUs",
+        badge="AURA",
+    )
+    ui.note(
+        f"Current plan GPU target: {gpu_target}. Starter bundles target T4, Pro targets A10G, and Elite targets A100.",
+        kind="ok",
+    )
+
+    datasets = store.user_datasets(user["email"], with_rows=False)
+    models = store.user_models(user["email"])
+    runtime_ids = list(inference.SPACE_APP_RUNTIMES)
+    runtime_labels = {
+        key: inference.SPACE_APP_RUNTIMES[key]["label"] for key in runtime_ids
+    }
+    dataset_options = ["— no sample dataset —"] + [
+        f"{d['name']} ({d['row_count']} rows)" for d in datasets
+    ]
+    model_options = ["— no model reference —"] + [
+        f"{m['name']} · {m['base_model']}" for m in models
+    ]
+
+    with st.form("space_app_form"):
+        left, right = st.columns([2, 1], gap="large")
+        with left:
+            app_name = st.text_input("App name", value="My App")
+            description = st.text_area(
+                "Description",
+                height=110,
+                placeholder="Describe the app you want to build inside Asian Inference…",
+            )
+            runtime = st.selectbox(
+                "Runtime template",
+                runtime_ids,
+                format_func=lambda value: runtime_labels[value],
+            )
+            github_repo = st.text_input(
+                "GitHub repo (optional)",
+                placeholder="your-name/your-app-repo",
+            )
+        with right:
+            st.markdown("### Build profile")
+            st.caption("License: Apache-2.0")
+            dataset_label = st.selectbox("Sample dataset", dataset_options)
+            model_label = st.selectbox("Model reference", model_options)
+            st.text_input("Modal GPU target", value=gpu_target, disabled=True)
+        submitted = st.form_submit_button(
+            "🚀 Generate app bundle",
+            use_container_width=True,
+            type="primary",
+        )
+
+    if submitted:
+        sample_rows: list[dict] = []
+        if dataset_label != dataset_options[0]:
+            dataset_index = dataset_options.index(dataset_label) - 1
+            full_dataset = store.get_dataset(datasets[dataset_index]["id"])
+            sample_rows = (full_dataset or {}).get("rows") or []
+        model_ref = "" if model_label == model_options[0] else model_label
+
+        files = inference.build_space_app_files(
+            app_name,
+            description,
+            runtime=runtime,
+            sample_rows=sample_rows,
+            model_label=model_ref,
+            plan_id=user.get("plan", "starter"),
+            github_repo=github_repo,
+        )
+        st.session_state["space_app_files"] = files
+        st.session_state["space_app_zip"] = _build_zip_archive(files)
+        st.session_state["space_app_name"] = (app_name or "my_app").strip() or "my_app"
+        first_path = next(iter(files))
+        st.session_state["space_app_root"] = "/".join(first_path.split("/")[:2])
+        st.success("App bundle ready.")
+
+    files = st.session_state.get("space_app_files") or {}
+    if not files:
+        return
+
+    bundle_name = st.session_state.get("space_app_name", "my_app").replace(" ", "_").lower()
+    bundle_root = st.session_state.get("space_app_root", "apps/app")
+    zip_bytes = st.session_state.get("space_app_zip")
+
+    if zip_bytes:
+        st.download_button(
+            "⬇ Download app bundle (.zip)",
+            zip_bytes,
+            file_name=f"{bundle_name}_apps_bundle.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True,
+        )
+
+    tabs = st.tabs([
+        "README", "App", "Modal worker", "GitHub Action", "Requirements",
+        "GitHub setup", "License", "Sample data",
+    ])
+    with tabs[0]:
+        st.code(files.get(f"{bundle_root}/README.md", ""), language="markdown")
+    with tabs[1]:
+        st.code(files.get(f"{bundle_root}/app.py", ""), language="python")
+    with tabs[2]:
+        st.code(files.get(f"{bundle_root}/modal_app.py", ""), language="python")
+    with tabs[3]:
+        st.code(files.get(f"{bundle_root}/.github/workflows/modal-deploy.yml", ""), language="yaml")
+    with tabs[4]:
+        st.code(files.get(f"{bundle_root}/requirements.txt", ""), language="text")
+    with tabs[5]:
+        st.code(files.get(f"{bundle_root}/github_setup.md", ""), language="markdown")
+    with tabs[6]:
+        st.code(files.get(f"{bundle_root}/LICENSE", ""), language="text")
+    with tabs[7]:
+        st.code(files.get(f"{bundle_root}/data/sample_rows.json", "[]"), language="json")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -797,8 +1569,10 @@ def page_model_hub(user: dict) -> None:
         with st.expander(f"▶ Try inference — {model['name']}"):
             prompt = st.text_area("Prompt", height=80, key=f"hub_prompt_{model['id']}")
             if st.button("Run →", key=f"hub_run_{model['id']}"):
-                _run_inference(model["hf_repo"] or model["base_model"], prompt,
-                               user["email"], f"hub_out_{model['id']}")
+                _run_inference(
+                    model["hf_repo"] or model["base_model"], user,
+                    f"hub_out_{model['id']}", prompt,
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -858,9 +1632,9 @@ def page_api_keys(user: dict) -> None:
     with st.form("add_api_key", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 3, 1])
         with col1:
-            label = st.text_input("Label", placeholder="My Hugging Face token")
+            label = st.text_input("Label", placeholder="My model registry token")
         with col2:
-            value = st.text_input("Key value", type="password", placeholder="hf_…")
+            value = st.text_input("Key value", type="password", placeholder="paste your access token")
         with col3:
             st.markdown("<br>", unsafe_allow_html=True)
             add = st.form_submit_button("Add", use_container_width=True)
@@ -1017,6 +1791,13 @@ def page_account(user: dict) -> None:
                 ok, message = core.change_password(user["email"], current, new)
                 (st.success if ok else st.error)(message)
 
+        st.markdown("### Session security")
+        st.caption(f"Persistent sign-in lasts up to {AUTH_SESSION_DAYS} days on a browser that keeps cookies.")
+        if st.button("🚪 Sign out from all devices", type="secondary", use_container_width=True):
+            count = core.revoke_all_persistent_sessions(user["email"])
+            _sign_out(f"Signed out from all devices. Closed {count} saved session(s).")
+            st.rerun()
+
     with right:
         st.markdown("### Subscription")
         status = billing.subscription_status(user["email"])
@@ -1071,13 +1852,13 @@ FAQS = [
     ("How do I train my own model?",
      "My Models → Create & fine-tune. Fill in the form, download the Colab notebook, "
      "open it in Google Colab, pick the free T4 GPU and run all cells. The notebook "
-     "asks for your Hugging Face token at runtime."),
+     "asks for your repository access token at runtime."),
     ("Can other people see my datasets and models?",
      "Only if you mark them public. Starter is private-only; Pro and Elite can publish "
      "to the community Hub."),
     ("Where is my data stored?",
      "In the platform database. When offsite storage is configured, dataset rows are "
-     "also mirrored to a private Hugging Face repository owned by the platform."),
+     "also mirrored to a private managed registry owned by the platform."),
 ]
 
 
@@ -1134,6 +1915,10 @@ def page_admin(admin: dict) -> None:
                 "SECRET_KEY in Streamlit secrets.", kind="warn")
     connected, storage_message = core.storage_status()
     ui.note(storage_message, kind="ok" if connected else "warn")
+    memory_ok, memory_message = supabase_memory.memory_diagnostic()
+    ui.note(memory_message, kind="ok" if memory_ok else "warn")
+    backend_ok, backend_message = supabase_backend.health_diagnostic()
+    ui.note(backend_message, kind="ok" if backend_ok else "warn")
 
     users = store.list_users()
     datasets = store.all_datasets()
@@ -1150,8 +1935,8 @@ def page_admin(admin: dict) -> None:
         column.markdown(ui.stat(value, label), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab_users, tab_datasets, tab_models, tab_tickets, tab_tokens = st.tabs(
-        ["👤 Users", "📦 Datasets", "🤖 Models", "🎫 Tickets", "🪙 Tokens"])
+    tab_users, tab_datasets, tab_models, tab_tickets, tab_tokens, tab_diagnostics, tab_announcements = st.tabs(
+        ["👤 Users", "📦 Datasets", "🤖 Models", "🎫 Tickets", "🪙 Tokens", "🧪 Diagnostics", "📣 Announcements"])
 
     with tab_users:
         query = st.text_input("Filter by email", key="admin_user_filter")
@@ -1277,6 +2062,62 @@ def page_admin(admin: dict) -> None:
             count = core.reset_monthly_tokens()
             st.success(f"Reset token allowances for {count} account(s).")
 
+    with tab_diagnostics:
+        cards, rows = _diagnostic_snapshot(admin)
+        st.markdown(ui.diagnostic_grid(cards), unsafe_allow_html=True)
+        st.markdown(ui.diagnostic_rows(rows), unsafe_allow_html=True)
+        st.markdown("### Platform totals")
+        st.dataframe(pd.DataFrame([
+            {"metric": "Users", "value": len(users)},
+            {"metric": "Datasets", "value": len(datasets)},
+            {"metric": "Models", "value": len(models)},
+            {"metric": "Open tickets", "value": store.count_open_tickets()},
+            {"metric": "Flagged users", "value": sum(1 for u in users if u["flagged"])},
+        ]), use_container_width=True, hide_index=True)
+
+    with tab_announcements:
+        current = store.get_announcement() or {}
+        if current.get("active") and current.get("message"):
+            preview = esc(current.get("message", "")).replace("\n", "<br>")
+            st.markdown(
+                '<div class="admin-bar">'
+                f'📣 Live announcement · {esc(current.get("author") or "Admin")}<br>{preview}'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            ui.note("No live announcement right now.")
+
+        with st.form("admin_announcement_form"):
+            message = st.text_area(
+                "Announcement message",
+                value=current.get("message", ""),
+                height=120,
+                placeholder="Tell everyone about maintenance, a new feature, or an important update…",
+            )
+            active = st.checkbox("Show this announcement to all signed-in users",
+                                 value=bool(current.get("active")))
+            col1, col2 = st.columns(2)
+            with col1:
+                publish = st.form_submit_button("📣 Save announcement", use_container_width=True,
+                                                type="primary")
+            with col2:
+                clear = st.form_submit_button("Clear announcement", use_container_width=True)
+
+        if publish:
+            trimmed = (message or "").strip()[:2000]
+            if not trimmed:
+                st.error("Write an announcement first.")
+            else:
+                store.set_announcement(trimmed, admin["email"], active=active)
+                st.success("Announcement updated.")
+                st.rerun()
+
+        if clear:
+            store.clear_announcement()
+            st.success("Announcement cleared.")
+            st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # ROUTER
@@ -1285,8 +2126,10 @@ ROUTES = {
     "🏠  Home": page_home,
     "💬  Dataset Chat": page_dataset_chat,
     "🤖  My Models": page_my_models,
+    "🛰️  Apps": page_space_app,
     "📦  Dataset Hub": page_dataset_hub,
     "🌐  Model Hub": page_model_hub,
+    "🧪  Diagnostics": page_diagnostics,
     "🔑  API Keys": page_api_keys,
     "⚡  Upgrade": page_upgrade,
     "⚙️  Account": page_account,
@@ -1295,6 +2138,7 @@ ROUTES = {
 
 
 def main() -> None:
+    _restore_sign_in()
     email = st.session_state.get(SESSION_EMAIL)
     if not email:
         page_auth()
@@ -1303,9 +2147,11 @@ def main() -> None:
     user = core.get_user(email)
     if user is None:
         # The account disappeared (deleted by an admin) — drop the stale session.
-        st.session_state.clear()
+        _sign_out()
         st.rerun()
         return
+
+    _render_auth_cookie_updates()
 
     if user["flagged"] and not is_admin(user["email"]):
         st.markdown(
@@ -1315,11 +2161,16 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         if st.button("Sign out"):
-            st.session_state.clear()
+            _sign_out()
             st.rerun()
         return
 
     page = ui.sidebar_nav(user)
+    if st.session_state.pop(ui.SIGN_OUT_REQUEST_KEY, False):
+        _sign_out()
+        st.rerun()
+        return
+    _render_announcement_banner()
     if page == ui.ADMIN_PAGE:
         # Authorisation is re-derived from the account on every run, never from
         # a flag written into the session at sign-in.
