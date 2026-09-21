@@ -7,11 +7,10 @@ import ui
 # ── Intent: asking about data is not asking for data ─────────────────
 def test_build_requests_are_detected():
     for message in [
-        "generate 50 rows of movie reviews",
         "make me a dataset about coffee shops",
-        "build 100 Q&A pairs about python",
-        "I need 30 spam examples",
+        "build a dataset with 100 Q&A pairs about python",
         "can you create training data for sentiment analysis",
+        "generate a synthetic dataset for movie reviews",
     ]:
         assert inference.detect_dataset_intent(message), message
 
@@ -30,7 +29,7 @@ def test_questions_do_not_trigger_a_build():
 
 
 def test_intent_carries_a_row_count_and_columns():
-    spec = inference.detect_dataset_intent("generate 75 customer reviews")
+    spec = inference.detect_dataset_intent("generate a dataset with 75 customer reviews")
     assert spec["rows"] == 75
     assert spec["columns"] == ["text", "sentiment", "score"]
 
@@ -53,6 +52,20 @@ def test_yes_accepts_the_assistants_previous_offer():
 
 def test_yes_without_an_offer_is_just_conversation():
     assert inference.detect_dataset_intent("yes", []) is None
+
+
+def test_notebook_requests_are_detected():
+    spec = inference.detect_notebook_intent("make me a colab notebook to fine tune a sentiment model")
+    assert spec is not None
+    assert spec["name"].endswith("Model")
+
+
+def test_learning_questions_do_not_trigger_notebook_builds():
+    assert inference.detect_notebook_intent("how do I fine tune a model in colab?") is None
+
+
+def test_notebook_requests_win_even_when_the_word_dataset_is_present():
+    assert inference.detect_notebook_intent("make me a colab notebook for my dataset")
 
 
 # ── Offline: a real chatbot, not an error page ───────────────────────
@@ -81,6 +94,18 @@ def test_offline_is_honest_about_what_it_cannot_answer(monkeypatch):
     monkeypatch.setattr(config, "HF_TOKEN", "")
     reply = inference.chat_response("explain attention heads to me?")
     assert "isn't connected" in reply
+
+
+def test_offline_simple_math_does_not_turn_into_a_dataset(monkeypatch):
+    monkeypatch.setattr(config, "HF_TOKEN", "")
+    reply = inference.chat_response("what is 8")
+    assert "number" in reply.lower()
+    assert "dataset" not in reply.lower()
+
+
+def test_non_explicit_data_requests_do_not_trigger_builds():
+    assert inference.detect_dataset_intent("generate 50 customer reviews") is None
+    assert inference.detect_dataset_intent("I need 30 spam examples") is None
 
 
 def test_placeholder_tokens_count_as_unconfigured():
@@ -130,9 +155,9 @@ def test_assistant_mark_is_drawn_not_an_emoji():
     assert "viewBox" in ui.BOT_MARK
 
 
-def test_bare_numbers_count_only_alongside_a_build_verb():
-    assert inference.detect_dataset_intent("generate 75 customer reviews")["rows"] == 75
-    # No build verb: a year in a sentence is not a row count.
+def test_bare_numbers_count_only_inside_an_explicit_dataset_request():
+    assert inference.detect_dataset_intent("generate a dataset with 75 customer reviews")["rows"] == 75
+    # No explicit dataset request: a year in a sentence is not a row count.
     assert inference.detect_dataset_intent("tell me about the 1990s") is None
 
 

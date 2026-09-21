@@ -94,3 +94,29 @@ def test_duplicate_api_key_labels_are_refused(user):
 def test_empty_dataset_is_refused(user):
     with pytest.raises(ValueError):
         core.create_dataset(user["email"], "Empty", "", [], False, [])
+
+
+def test_resolve_model_token_prefers_registry_flavoured_keys(user):
+    core.set_plan(user["email"], "pro")
+    user = core.get_user(user["email"])
+    core.add_api_key(user, "OpenAI", "sk-short")
+    core.add_api_key(user, "Model registry", "hf_best-token")
+
+    assert core.resolve_model_token(user) == "hf_best-token"
+
+
+def test_create_dataset_forwards_the_user_provider_token(user, monkeypatch):
+    captured = {}
+
+    def fake_mirror(_dataset_id, _rows, provider_token=None):
+        captured["token"] = provider_token
+        return "managed", "repo/x", "items/y.json"
+
+    monkeypatch.setattr(core, "mirror_to_hub", fake_mirror)
+    dataset_id = core.create_dataset(
+        user["email"], "Forwarded", "", ROWS, False, [], provider_token="hf_user"
+    )
+
+    assert dataset_id
+    assert captured["token"] == "hf_user"
+    assert store.get_dataset(dataset_id)["storage_backend"] == "managed"

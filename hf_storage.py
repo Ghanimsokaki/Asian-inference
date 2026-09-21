@@ -112,12 +112,12 @@ def storage_diagnostic(token: str | None = None) -> str:
     if not _token(token):
         return (
             "Secure storage is not configured. An administrator needs to add a "
-            "Hugging Face write token as HF_TOKEN in Streamlit secrets."
+            "managed storage token in the deployment secrets."
         )
     if not whoami(token):
         return (
-            "Secure storage rejected the platform credentials. Check that HF_TOKEN "
-            "is valid and has write access."
+            "Secure storage rejected the configured credentials. Check that the "
+            "deployment token is valid and has write access."
         )
     return "Secure storage is connected."
 
