@@ -217,7 +217,9 @@ def _model_row(row: dict | None) -> dict | None:
 
 def health_diagnostic() -> tuple[bool, str]:
     if not is_configured():
-        return False, "Supabase app backend is not configured."
+        return False, config.supabase_not_configured_message(
+            "Supabase app backend is not configured."
+        )
     response = _request("GET", "users", params={"select": "email", "limit": "1"})
     if response is None:
         return False, "Supabase app backend could not be reached."

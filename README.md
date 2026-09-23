@@ -170,6 +170,24 @@ and mirrored app data server-side. If you choose to use an anon key instead, mak
 your RLS policies allow server-side reads and writes to both the chat memory table and
 the mirrored app tables.
 
+`.streamlit/secrets.toml.example` lists every key with its default, so you can copy it
+to `.streamlit/secrets.toml` and fill it in.
+
+### Reading the Supabase banners
+
+The admin panel and the dashboard pills report three different states, so the wording
+tells you where to look:
+
+| Banner | Meaning | Fix |
+|---|---|---|
+| `… is not configured` | `SUPABASE_URL` and/or a key are missing — an unedited template value counts as missing | Add the settings and restart the app (reboot it on Streamlit Cloud) |
+| `… could not be reached` | Settings are present but the host did not answer | Check the project URL and outbound network access |
+| `… rejected the configured credentials` | Supabase answered with an auth error | Use the service-role key, or allow the anon key through RLS |
+| `… tables are missing` | The project is reachable but `supabase_schema.sql` was never run | Run it once in the SQL editor |
+
+Chat memory and the mirrored backend are both optional: the app keeps running on
+session-only chat and the local SQLite database when they are switched off.
+
 ---
 
 ## Payment webhooks
