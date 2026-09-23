@@ -89,7 +89,10 @@ except ValueError:
     AUTH_SESSION_DAYS = 180
 
 # ── Optional Supabase chat memory ────────────────────────────────────
-SUPABASE_URL = secret("SUPABASE_URL").rstrip("/")
+#: Placeholder-screened like every other external service, so leaving the
+#: README template value in place is reported as "not configured" rather than
+#: as an unreachable host.
+SUPABASE_URL = _real_secret("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = (
     _real_secret("SUPABASE_SERVICE_ROLE_KEY")
     or _real_secret("SUPABASE_ANON_KEY")
@@ -98,6 +101,38 @@ SUPABASE_SCHEMA = secret("SUPABASE_SCHEMA", "public")
 SUPABASE_CHAT_TABLE = secret("SUPABASE_CHAT_TABLE", "chat_memories")
 SUPABASE_APP_PREFIX = secret("SUPABASE_APP_PREFIX", "ai")
 SUPABASE_PRIMARY_BACKEND = secret_bool("SUPABASE_PRIMARY_BACKEND", True)
+
+
+def supabase_missing_settings() -> list[str]:
+    """Names of the Supabase settings the optional features still need.
+
+    Both the URL and a key are required; either the service-role or the anon
+    key works, which is why the key is reported as a choice.
+    """
+    missing: list[str] = []
+    if not SUPABASE_URL:
+        missing.append("SUPABASE_URL")
+    if not SUPABASE_KEY:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)")
+    return missing
+
+
+def supabase_setup_hint() -> str:
+    """What an operator must add, or an empty string when Supabase is set up."""
+    missing = supabase_missing_settings()
+    if not missing:
+        return ""
+    return (
+        "Add " + " and ".join(missing) + " to Streamlit secrets "
+        "(.streamlit/secrets.toml) or the environment, then restart the app."
+    )
+
+
+def supabase_not_configured_message(prefix: str) -> str:
+    """Banner text for a disabled Supabase feature, naming what is missing."""
+    hint = supabase_setup_hint()
+    return f"{prefix} {hint}".strip()
+
 
 # ── Storage ──────────────────────────────────────────────────────────
 DATA_DIR = Path(secret("DATA_DIR", ".")).expanduser()

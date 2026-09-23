@@ -138,7 +138,9 @@ def clear_chat_history(email: str) -> bool:
 
 def memory_diagnostic() -> tuple[bool, str]:
     if not is_configured():
-        return False, "Persistent chat memory is not configured."
+        return False, config.supabase_not_configured_message(
+            "Persistent chat memory is not configured."
+        )
     try:
         response = requests.get(
             _endpoint(),
