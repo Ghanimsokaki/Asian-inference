@@ -7,7 +7,11 @@ twice.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
+import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,38 @@ APP_TAGLINE = "Build AI datasets · Fine-tune models · Share with the community
 # Reading ``st.secrets`` raises when no secrets file exists, so every access is
 # guarded; this module must stay importable outside a Streamlit runtime (tests,
 # scripts, webhook workers).
+
+
+def _secrets_parse_error() -> str:
+    """Inspect the local file once; Streamlit otherwise hides TOML errors in secret()."""
+    path = Path(__file__).resolve().parent / ".streamlit/secrets.toml"
+    if not path.exists():
+        return ""
+    try:
+        with path.open("rb") as handle:
+            source = handle.read()
+        tomllib.loads(source.decode("utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        # Do not echo the source line: it may contain a credential.
+        line = getattr(exc, "lineno", None)
+        if line is None:
+            match = re.search(r"at line (\d+)", str(exc))
+            line = match.group(1) if match else None
+        if line is None and "at end of document" in str(exc):
+            line = len(source.splitlines()) or 1
+        detail = str(exc).split(" (at ", 1)[0]
+        # TOML errors can quote a character from a malformed secret: redact it.
+        detail = re.sub(r"(['\"])[^'\"]*\1", "<character>", detail)
+        label = f"invalid TOML ({detail})"
+        return f"{label} at line {line}" if line else label
+    except UnicodeError:
+        return "invalid TOML encoding"
+    except OSError:
+        return ""
+    return ""
+
+
+SECRETS_TOML_ERROR = _secrets_parse_error()
 
 
 def secret(key: str, fallback: str = "") -> str:
@@ -83,6 +119,12 @@ STRIPE_WEBHOOK_SECRET = _real_secret("STRIPE_WEBHOOK_SECRET")
 
 PUBLIC_URL = secret("PUBLIC_URL", "https://asian-inference.streamlit.app").rstrip("/")
 AUTH_COOKIE_NAME = secret("AUTH_COOKIE_NAME", "asian_inference_session").strip() or "asian_inference_session"
+AUTH_SESSION_PERMANENT = secret_bool("AUTH_SESSION_PERMANENT", True)
+MAX_COOKIE_DAYS = 400
+try:
+    PERMANENT_SESSION_DAYS = max(1, int(secret("PERMANENT_SESSION_DAYS", "36500")))
+except ValueError:
+    PERMANENT_SESSION_DAYS = 36500
 try:
     AUTH_SESSION_DAYS = max(1, int(secret("AUTH_SESSION_DAYS", "180")))
 except ValueError:
@@ -95,8 +137,48 @@ except ValueError:
 SUPABASE_URL = _real_secret("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = (
     _real_secret("SUPABASE_SERVICE_ROLE_KEY")
+    or _real_secret("SUPABASE_SECRET_KEY")
     or _real_secret("SUPABASE_ANON_KEY")
+    or _real_secret("SUPABASE_PUBLISHABLE_KEY")
+    or _real_secret("SUPABASE_KEY")
 )
+
+
+def supabase_key_family(key: str | None = None) -> str:
+    """Classify a key for diagnostics only; never use this for authorization."""
+    value = SUPABASE_KEY if key is None else key
+    if value.startswith("sb_secret_"):
+        return "service"
+    if value.startswith("sb_publishable_"):
+        return "anon"
+    try:
+        payload = value.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        role = claims.get("role")
+        if role == "service_role":
+            return "service"
+        if role in {"anon", "authenticated"}:
+            return "anon"
+    except (IndexError, ValueError, TypeError, UnicodeError):
+        pass
+    return "unknown"
+
+
+def supabase_rls_caveat() -> str:
+    if supabase_key_family() == "anon":
+        return (" Reads and writes are subject to row-level security (RLS); a 200 [] "
+                "response can still mean rows were filtered or a write did not persist.")
+    return ""
+
+
+def supabase_rejection_advice() -> str:
+    family = supabase_key_family()
+    if family == "anon":
+        return " Check the anon/publishable key and RLS policies for reads and writes."
+    if family == "service":
+        return " Check the secret/service-role key and project URL."
+    return " Check the key and project URL; anon/publishable keys also require RLS policies."
+
 SUPABASE_SCHEMA = secret("SUPABASE_SCHEMA", "public")
 SUPABASE_CHAT_TABLE = secret("SUPABASE_CHAT_TABLE", "chat_memories")
 SUPABASE_APP_PREFIX = secret("SUPABASE_APP_PREFIX", "ai")
@@ -113,16 +195,18 @@ def supabase_missing_settings() -> list[str]:
     if not SUPABASE_URL:
         missing.append("SUPABASE_URL")
     if not SUPABASE_KEY:
-        missing.append("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)")
+        missing.append("SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SECRET_KEY, SUPABASE_ANON_KEY, SUPABASE_PUBLISHABLE_KEY, SUPABASE_KEY)")
     return missing
 
 
 def supabase_setup_hint() -> str:
     """What an operator must add, or an empty string when Supabase is set up."""
     missing = supabase_missing_settings()
+    problem = (f".streamlit/secrets.toml has {SECRETS_TOML_ERROR}. "
+               if SECRETS_TOML_ERROR else "")
     if not missing:
-        return ""
-    return (
+        return problem.strip()
+    return problem + (
         "Add " + " and ".join(missing) + " to Streamlit secrets "
         "(.streamlit/secrets.toml) or the environment, then restart the app."
     )

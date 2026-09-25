@@ -225,10 +225,10 @@ def health_diagnostic() -> tuple[bool, str]:
         return False, "Supabase app backend could not be reached."
     if response.ok:
         mode = "primary backend" if primary_enabled() else "mirror"
-        return True, f"Supabase app backend {mode} is connected."
+        return True, f"Supabase app backend {mode} is connected." + config.supabase_rls_caveat()
     if response.status_code == 404:
         return False, "Supabase app tables are missing. Run supabase_schema.sql."
-    return False, "Supabase app backend rejected the configured credentials."
+    return False, "Supabase app backend rejected the configured credentials." + config.supabase_rejection_advice()
 
 
 # ─────────────────────────────────────────────────────────────────────

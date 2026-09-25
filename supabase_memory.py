@@ -151,5 +151,5 @@ def memory_diagnostic() -> tuple[bool, str]:
     except requests.RequestException:
         return False, "Persistent chat memory could not reach Supabase."
     if response.ok:
-        return True, "Persistent chat memory is connected."
-    return False, "Persistent chat memory rejected the configured Supabase credentials."
+        return True, "Persistent chat memory is connected." + config.supabase_rls_caveat()
+    return False, "Persistent chat memory rejected the configured Supabase credentials." + config.supabase_rejection_advice()

@@ -143,3 +143,15 @@ create table if not exists public.ai_auth_sessions (
 
 create index if not exists ai_auth_sessions_user_idx
     on public.ai_auth_sessions (user_email, expires_at desc);
+
+-- RLS guidance (documentation only; this file never changes policies).
+-- Case 1: Secret/service-role key on a trusted server: keep the key server-side,
+-- never expose it in a browser or repository. It bypasses RLS; use application
+-- authorization and restrict access to Streamlit secrets. No RLS SQL is needed.
+-- Case 2: Anon/publishable key: reads AND writes are subject to RLS. A 200 []
+-- response can mean a SELECT policy hid the row, even after a successful POST.
+-- Design and audit per-table SELECT, INSERT, UPDATE and DELETE policies (including
+-- chat_memories and ai_auth_sessions), and verify with scripts/check_supabase.py
+-- --write-test. This app sends the project key, not per-user Supabase JWTs, so
+-- auth.uid() is not an app user identity. Do NOT add broad public policies for
+-- credential/session tables; prefer a server-only secret key for this design.
