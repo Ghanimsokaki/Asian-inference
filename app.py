@@ -25,7 +25,7 @@ import supabase_backend
 import supabase_memory
 import ui
 from config import (
-    APP_ICON, APP_NAME, AUTH_COOKIE_NAME, AUTH_SESSION_DAYS, PLANS,
+    APP_ICON, APP_NAME, AUTH_COOKIE_NAME, AUTH_SESSION_DAYS, AUTH_SESSION_PERMANENT, MAX_COOKIE_DAYS, PLANS,
     TOKENS_PER_ROW, USING_DEFAULT_SECRET, display_limit, is_admin, plan_for,
 )
 from ui import esc
@@ -42,6 +42,7 @@ core.bootstrap()
 SESSION_EMAIL = "user_email"
 AUTH_COOKIE_SET_KEY = "_auth_cookie_to_set"
 AUTH_COOKIE_CLEAR_KEY = "_auth_cookie_to_clear"
+AUTH_SESSION_TOKEN_KEY = "_auth_session_token"
 HERO_IMAGE_CANDIDATES = (
     Path("assets/home-hero.png"),
     Path("assets/home-hero.jpg"),
@@ -65,6 +66,7 @@ def _auth_cookie() -> str:
 def _queue_auth_cookie(token: str) -> None:
     token = (token or "").strip()
     if token:
+        st.session_state[AUTH_SESSION_TOKEN_KEY] = token
         st.session_state[AUTH_COOKIE_SET_KEY] = token
 
 
@@ -79,7 +81,8 @@ def _render_auth_cookie_updates() -> None:
     clear = bool(st.session_state.pop(AUTH_COOKIE_CLEAR_KEY, False))
     if not token and not clear:
         return
-    max_age = max(1, int(AUTH_SESSION_DAYS)) * 24 * 60 * 60
+    cookie_days = MAX_COOKIE_DAYS if AUTH_SESSION_PERMANENT else min(AUTH_SESSION_DAYS, MAX_COOKIE_DAYS)
+    max_age = max(1, int(cookie_days)) * 24 * 60 * 60
     statements: list[str] = []
     if clear:
         statements.append(
@@ -109,23 +112,31 @@ def _render_auth_cookie_updates() -> None:
 
 
 def _restore_sign_in() -> bool:
-    if st.session_state.get(SESSION_EMAIL):
-        return True
-    token = _auth_cookie()
+    # Check the server-side record even for an already open Streamlit session.
+    # A revoked cookie must not keep working just because session_state survived.
+    active_email = st.session_state.get(SESSION_EMAIL)
+    token = st.session_state.get(AUTH_SESSION_TOKEN_KEY) or _auth_cookie()
     if not token:
-        return False
+        return bool(active_email)  # ephemeral fallback if session storage failed
     user = core.authenticate_persistent_session(token)
-    if not user:
+    if not user or (active_email and user["email"] != active_email):
+        st.session_state.clear()
         _queue_auth_cookie_clear()
         return False
-    st.session_state[SESSION_EMAIL] = user["email"]
-    _queue_auth_cookie(token)
+    if not active_email:
+        st.session_state[SESSION_EMAIL] = user["email"]
+        _queue_auth_cookie(token)  # renew browser cookie on a new visit
     return True
 
 
 
 def _sign_out(message: str | None = None) -> None:
-    core.revoke_persistent_session(_auth_cookie())
+    token = st.session_state.get(AUTH_SESSION_TOKEN_KEY)
+    if token:
+        core.revoke_persistent_session(token)
+    cookie = _auth_cookie()
+    if cookie and cookie != token:
+        core.revoke_persistent_session(cookie)
     st.session_state.clear()
     if message:
         st.session_state["auth_notice"] = message
@@ -463,22 +474,18 @@ def page_auth() -> None:
             with st.form("login_form"):
                 email = st.text_input("Email", placeholder="you@example.com")
                 password = st.text_input("Password", type="password")
-                remember_me = st.checkbox(
-                    "Keep me signed in on this device",
-                    value=True,
-                    help=f"Saves your login in this browser for up to {AUTH_SESSION_DAYS} days.",
-                )
+                if AUTH_SESSION_PERMANENT:
+                    st.caption("You'll stay signed in on this device until you sign out or change your password.")
+                else:
+                    st.caption(f"This browser can keep you signed in for up to {AUTH_SESSION_DAYS} days.")
                 submitted = st.form_submit_button("Sign in →", use_container_width=True, type="primary")
             if submitted:
                 ok, message, user = core.login(email, password)
                 if ok and user:
                     st.session_state[SESSION_EMAIL] = user["email"]
-                    if remember_me:
-                        token = core.create_persistent_session(user["email"])
-                        if token:
-                            _queue_auth_cookie(token)
-                    else:
-                        _queue_auth_cookie_clear()
+                    token = core.create_persistent_session(user["email"])
+                    if token:
+                        _queue_auth_cookie(token)
                     st.rerun()
                 else:
                     st.error(message)
@@ -501,7 +508,13 @@ def page_auth() -> None:
                 else:
                     ok, message = core.register(email, password, name)
                     if ok:
-                        st.success(f"✅ {message} Sign in using the tab above.")
+                        user = core.get_user(email)
+                        if user:
+                            st.session_state[SESSION_EMAIL] = user["email"]
+                            token = core.create_persistent_session(user["email"])
+                            if token:
+                                _queue_auth_cookie(token)
+                            st.rerun()
                     else:
                         st.error(message)
 
@@ -1789,10 +1802,15 @@ def page_account(user: dict) -> None:
                 st.error("The new passwords don't match.")
             else:
                 ok, message = core.change_password(user["email"], current, new)
-                (st.success if ok else st.error)(message)
+                if ok:
+                    _sign_out("Password updated. Sign in again with your new password.")
+                    st.rerun()
+                else:
+                    st.error(message)
 
         st.markdown("### Session security")
-        st.caption(f"Persistent sign-in lasts up to {AUTH_SESSION_DAYS} days on a browser that keeps cookies.")
+        st.caption("Sign-in is renewed on each visit while your browser keeps the cookie. "
+                   "Sign out or change your password to revoke it.")
         if st.button("🚪 Sign out from all devices", type="secondary", use_container_width=True):
             count = core.revoke_all_persistent_sessions(user["email"])
             _sign_out(f"Signed out from all devices. Closed {count} saved session(s).")

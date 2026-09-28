@@ -139,7 +139,9 @@ TRAAKTEER_SECRET = "..."
 PUBLIC_URL = "https://your-app.streamlit.app"
 DATA_DIR   = "/var/lib/asian-inference"
 AUTH_COOKIE_NAME = "asian_inference_session"
-AUTH_SESSION_DAYS = 180
+AUTH_SESSION_PERMANENT = true
+PERMANENT_SESSION_DAYS = 36500
+# AUTH_SESSION_DAYS = 180  # only when AUTH_SESSION_PERMANENT = false
 MUSIC_URL  = "https://example.com/ambient.mp3"
 ```
 
@@ -149,7 +151,8 @@ MUSIC_URL  = "https://example.com/ambient.mp3"
 | `MODEL_PROVIDER_TOKEN` | Generation and managed inference are unavailable unless the user saves their own registry token in API Keys. Datasets still save locally. |
 | `SUPABASE_*` | Chat memory becomes session-only, and the Supabase-backed primary/mirror backend is disabled. |
 | `SUPABASE_PRIMARY_BACKEND` | When `true`, core app reads prefer Supabase while SQLite remains a local fallback/cache. |
-| `AUTH_COOKIE_NAME` / `AUTH_SESSION_DAYS` | Control the persistent sign-in cookie name and how long saved browser sessions last. |
+| `AUTH_COOKIE_NAME` / `AUTH_SESSION_DAYS` | The cookie name and legacy finite-session lifetime (when `AUTH_SESSION_PERMANENT = false`). |
+| `AUTH_SESSION_PERMANENT` / `PERMANENT_SESSION_DAYS` | Defaults to permanent saved sign-ins with a far-future database expiry. Cookies are capped at 400 days and renewed on visits; browser privacy policies (e.g. Safari ITP) may expire them sooner. Signing out and password changes revoke sessions. |
 | `STRIPE_*` / `TRAAKTEER_SECRET` | Paid upgrade buttons are disabled rather than linking to a checkout whose payment could never be credited. |
 | `ADMIN_EMAIL` | Falls back to the built-in default. |
 
@@ -161,17 +164,30 @@ Install `stripe` (commented out in `requirements.txt`) only if you use Stripe Ch
 
 1. Create a Supabase project.
 2. Open the SQL editor and run `supabase_schema.sql`.
-3. Add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to Streamlit secrets.
+3. Add `SUPABASE_URL` and a key to top-level Streamlit secrets (or environment). Accepted names in priority order: `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_SECRET_KEY`, `SUPABASE_ANON_KEY`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_KEY`. The generic name is the last fallback.
 4. Set `SUPABASE_PRIMARY_BACKEND = true` if you want Supabase to be the main backend.
 5. Restart the app.
 
-Using the service-role key is recommended because the Streamlit backend writes memory
-and mirrored app data server-side. If you choose to use an anon key instead, make sure
-your RLS policies allow server-side reads and writes to both the chat memory table and
-the mirrored app tables.
+Modern `sb_secret_` / `sb_publishable_` keys must be sent as `apikey` headers,
+not as `Authorization: Bearer` JWTs. Legacy service-role / anon JWT keys can use
+both headers. Never expose a secret key to browser code.
 
-`.streamlit/secrets.toml.example` lists every key with its default, so you can copy it
-to `.streamlit/secrets.toml` and fill it in.
+Using the service-role key is recommended because the Streamlit backend writes memory
+and mirrored app data server-side. If you choose to use an anon/publishable key instead, reads and writes are subject
+to row-level security (RLS) on both chat and app tables. A successful 200 [] read
+does not prove a write persisted. See the commented Case 1 / Case 2 guidance at
+the end of `supabase_schema.sql`; it does not modify policies when re-run.
+
+`.streamlit/secrets.toml.example` lists the settings; copy it to
+`.streamlit/secrets.toml` and fill it in. Place keys at the TOML top level, before
+any `[section]` header. A malformed file is called out with its error line.
+
+Run `python scripts/check_supabase.py` to see each setting's source without printing
+credentials. Use `python scripts/check_supabase.py --write-test` to insert, read back
+and delete disposable probe rows in chat memory and app sessions. It uses the reserved
+`__diagnostic__@asian-inference.invalid` address and may create a temporary app user
+to satisfy the session foreign key; check cleanup warnings. Do not use that address
+for real accounts.
 
 ### Reading the Supabase banners
 
@@ -182,7 +198,8 @@ tells you where to look:
 |---|---|---|
 | `… is not configured` | `SUPABASE_URL` and/or a key are missing — an unedited template value counts as missing | Add the settings and restart the app (reboot it on Streamlit Cloud) |
 | `… could not be reached` | Settings are present but the host did not answer | Check the project URL and outbound network access |
-| `… rejected the configured credentials` | Supabase answered with an auth error | Use the service-role key, or allow the anon key through RLS |
+| `… rejected the configured credentials` | Supabase answered HTTP 401/403 | For secret/service-role keys, check the project and key; for anon/publishable keys, inspect RLS policies |
+| `… request failed (HTTP …)` | Supabase answered with a non-auth error; check the status code and table/schema, without logging secrets | Check table name, schema and project status |
 | `… tables are missing` | The project is reachable but `supabase_schema.sql` was never run | Run it once in the SQL editor |
 
 Chat memory and the mirrored backend are both optional: the app keeps running on

@@ -18,7 +18,7 @@ from typing import Any, Sequence
 
 import store
 from config import (
-    ADMIN_PLAN, AUTH_SESSION_DAYS, DEFAULT_PLAN,
+    ADMIN_PLAN, AUTH_SESSION_DAYS, AUTH_SESSION_PERMANENT, PERMANENT_SESSION_DAYS, DEFAULT_PLAN,
     MANUAL_GRANTS_PER_HOUR_BEFORE_FLAG, MAX_MANUAL_GRANT, PLANS, RATE_LIMITS,
     SECRET_KEY, TOKENS_PER_ROW, is_admin, plan_for,
 )
@@ -200,12 +200,13 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 
 
 
-def create_persistent_session(email: str, days: int = AUTH_SESSION_DAYS) -> str | None:
+def create_persistent_session(email: str, days: int | None = None) -> str | None:
     email = normalise_email(email)
     if not email or store.get_user(email) is None:
         return None
     token = secrets.token_urlsafe(32)
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+    lifetime = days if days is not None else (PERMANENT_SESSION_DAYS if AUTH_SESSION_PERMANENT else AUTH_SESSION_DAYS)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=max(1, int(lifetime)))).isoformat(timespec="seconds")
     if not store.create_auth_session(_hash_session_token(token), email, expires_at):
         return None
     return token
@@ -229,7 +230,8 @@ def authenticate_persistent_session(token: str) -> dict | None:
     if user is None or (user.get("flagged") and not is_admin(user.get("email"))):
         store.delete_auth_session(token_hash)
         return None
-    refreshed_expiry = (now + timedelta(days=max(1, int(AUTH_SESSION_DAYS)))).isoformat(timespec="seconds")
+    lifetime = PERMANENT_SESSION_DAYS if AUTH_SESSION_PERMANENT else AUTH_SESSION_DAYS
+    refreshed_expiry = (now + timedelta(days=max(1, int(lifetime)))).isoformat(timespec="seconds")
     store.touch_auth_session(token_hash, refreshed_expiry)
     return user
 

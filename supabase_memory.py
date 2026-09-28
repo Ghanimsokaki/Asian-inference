@@ -25,11 +25,7 @@ def is_configured() -> bool:
 
 
 def _headers(*, write: bool = False) -> dict[str, str]:
-    key = _configured_key()
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-    }
+    headers = config.supabase_auth_headers()
     if config.SUPABASE_SCHEMA and config.SUPABASE_SCHEMA != "public":
         profile = config.SUPABASE_SCHEMA
         headers["Accept-Profile"] = profile
@@ -151,5 +147,9 @@ def memory_diagnostic() -> tuple[bool, str]:
     except requests.RequestException:
         return False, "Persistent chat memory could not reach Supabase."
     if response.ok:
-        return True, "Persistent chat memory is connected."
-    return False, "Persistent chat memory rejected the configured Supabase credentials."
+        return True, "Persistent chat memory is connected." + config.supabase_rls_caveat()
+    if response.status_code in (401, 403):
+        return False, "Persistent chat memory rejected the configured Supabase credentials." + config.supabase_rejection_advice()
+    if response.status_code == 404:
+        return False, "Persistent chat memory table is missing. Run supabase_schema.sql."
+    return False, f"Persistent chat memory request failed (HTTP {response.status_code}); check the table and schema."
