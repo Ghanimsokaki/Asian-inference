@@ -168,6 +168,10 @@ Install `stripe` (commented out in `requirements.txt`) only if you use Stripe Ch
 4. Set `SUPABASE_PRIMARY_BACKEND = true` if you want Supabase to be the main backend.
 5. Restart the app.
 
+Modern `sb_secret_` / `sb_publishable_` keys must be sent as `apikey` headers,
+not as `Authorization: Bearer` JWTs. Legacy service-role / anon JWT keys can use
+both headers. Never expose a secret key to browser code.
+
 Using the service-role key is recommended because the Streamlit backend writes memory
 and mirrored app data server-side. If you choose to use an anon/publishable key instead, reads and writes are subject
 to row-level security (RLS) on both chat and app tables. A successful 200 [] read
@@ -194,7 +198,8 @@ tells you where to look:
 |---|---|---|
 | `… is not configured` | `SUPABASE_URL` and/or a key are missing — an unedited template value counts as missing | Add the settings and restart the app (reboot it on Streamlit Cloud) |
 | `… could not be reached` | Settings are present but the host did not answer | Check the project URL and outbound network access |
-| `… rejected the configured credentials` | Supabase answered with an auth error | For secret/service-role keys, check the project and key; for anon/publishable keys, inspect RLS policies |
+| `… rejected the configured credentials` | Supabase answered HTTP 401/403 | For secret/service-role keys, check the project and key; for anon/publishable keys, inspect RLS policies |
+| `… request failed (HTTP …)` | Supabase answered with a non-auth error; check the status code and table/schema, without logging secrets | Check table name, schema and project status |
 | `… tables are missing` | The project is reachable but `supabase_schema.sql` was never run | Run it once in the SQL editor |
 
 Chat memory and the mirrored backend are both optional: the app keeps running on

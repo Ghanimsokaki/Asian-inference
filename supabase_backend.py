@@ -26,11 +26,7 @@ def primary_enabled() -> bool:
 
 def _headers(*, write: bool = False, upsert: bool = False,
              representation: bool = False, count: bool = False) -> dict[str, str]:
-    key = config.SUPABASE_KEY
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-    }
+    headers = config.supabase_auth_headers()
     if config.SUPABASE_SCHEMA and config.SUPABASE_SCHEMA != "public":
         headers["Accept-Profile"] = config.SUPABASE_SCHEMA
         if write:
@@ -228,7 +224,9 @@ def health_diagnostic() -> tuple[bool, str]:
         return True, f"Supabase app backend {mode} is connected." + config.supabase_rls_caveat()
     if response.status_code == 404:
         return False, "Supabase app tables are missing. Run supabase_schema.sql."
-    return False, "Supabase app backend rejected the configured credentials." + config.supabase_rejection_advice()
+    if response.status_code in (401, 403):
+        return False, "Supabase app backend rejected the configured credentials." + config.supabase_rejection_advice()
+    return False, f"Supabase app backend request failed (HTTP {response.status_code}); check the table and schema."
 
 
 # ─────────────────────────────────────────────────────────────────────

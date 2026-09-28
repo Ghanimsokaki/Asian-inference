@@ -63,10 +63,11 @@ def test_jwt_role_family(role, family):
     assert config.supabase_key_family(f"head.{payload}.sig") == family
 
 
-def test_key_family_only_changes_diagnostics_not_headers(monkeypatch):
+def test_opaque_publishable_key_uses_apikey_only(monkeypatch):
     monkeypatch.setattr(config, "SUPABASE_KEY", "sb_publishable_example")
     assert supabase_memory._headers()["apikey"] == "sb_publishable_example"
-    assert supabase_backend._headers()["Authorization"] == "Bearer sb_publishable_example"
+    assert "Authorization" not in supabase_backend._headers()
+    assert "Authorization" not in supabase_memory._headers()
 
 
 @pytest.mark.parametrize("family,fragment", [
@@ -192,3 +193,43 @@ def test_probe_fails_when_delete_returns_200_empty(monkeypatch):
     monkeypatch.setattr(diagnostic, "_probe_request", fake)
     assert not diagnostic._roundtrip("chat_memories", {"content": "unique"},
                                      {"content": "unique"})
+
+
+@pytest.mark.parametrize("key,expects_bearer", [
+    ("sb_secret_opaque", False), ("sb_publishable_opaque", False),
+    ("eyJ.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig", True),
+    ("eyJ.eyJyb2xlIjoiYW5vbiJ9.sig", True),
+])
+def test_supabase_auth_header_depends_on_format_not_name(monkeypatch, key, expects_bearer):
+    monkeypatch.setattr(config, "SUPABASE_KEY", key)
+    for headers in (supabase_memory._headers(), supabase_backend._headers()):
+        assert headers["apikey"] == key
+        assert (headers.get("Authorization") == f"Bearer {key}") is expects_bearer
+
+
+@pytest.mark.parametrize("status,fragment", [
+    (401, "rejected"), (403, "rejected"), (404, "table is missing"),
+    (400, "HTTP 400"), (500, "HTTP 500"),
+])
+def test_memory_diagnostic_distinguishes_http_failures(monkeypatch, status, fragment):
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_KEY", "sb_secret_test")
+    class Response:
+        ok = False
+        status_code = status
+    monkeypatch.setattr(supabase_memory.requests, "get", lambda *_a, **_kw: Response())
+    assert fragment in supabase_memory.memory_diagnostic()[1]
+
+
+@pytest.mark.parametrize("status,fragment", [
+    (401, "rejected"), (403, "rejected"), (404, "tables are missing"),
+    (400, "HTTP 400"), (500, "HTTP 500"),
+])
+def test_backend_diagnostic_distinguishes_http_failures(monkeypatch, status, fragment):
+    monkeypatch.setattr(config, "SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(config, "SUPABASE_KEY", "sb_secret_test")
+    class Response:
+        ok = False
+        status_code = status
+    monkeypatch.setattr(supabase_backend, "_request", lambda *_a, **_kw: Response())
+    assert fragment in supabase_backend.health_diagnostic()[1]

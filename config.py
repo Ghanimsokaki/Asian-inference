@@ -144,6 +144,19 @@ SUPABASE_KEY = (
 )
 
 
+def supabase_auth_headers() -> dict[str, str]:
+    """Opaque API keys go in apikey only; legacy JWT keys may be Bearer tokens.
+
+    Do not use the privilege classification for authorization decisions. This
+    checks only the key format required by the Supabase REST gateway.
+    """
+    key = SUPABASE_KEY
+    headers = {"apikey": key}
+    if not key.startswith(("sb_secret_", "sb_publishable_")):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def supabase_key_family(key: str | None = None) -> str:
     """Classify a key for diagnostics only; never use this for authorization."""
     value = SUPABASE_KEY if key is None else key
