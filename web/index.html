@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b0d11" />
+  <title>orbit / community agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <div class="brand"><span class="orbit-mark"><i></i><i></i><i></i><i></i></span><span><b>orbit</b><small>community agent</small></span></div>
+      <div class="workspace-label">WORKSPACE</div>
+      <button class="nav-item active" data-view="home"><span>✦</span> Command center <em>⌘1</em></button>
+      <button class="nav-item" data-view="members"><span>◌</span> Members <strong>1,248</strong></button>
+      <button class="nav-item" data-view="moderation"><span>◒</span> Moderation <strong class="alert-count">4</strong></button>
+      <button class="nav-item" data-view="analytics"><span>◫</span> Analytics</button>
+      <div class="workspace-label connectors-label">CONNECTORS</div>
+      <button class="connector-row" id="githubConnector"><span class="connector-icon github">⌘</span><span>GitHub</span><small>not connected</small></button>
+      <button class="connector-row" id="nimConnector"><span class="connector-icon nim">N</span><span>NVIDIA NIM</span><small>secret needed</small></button>
+      <button class="connector-row" id="computerConnector"><span class="connector-icon chrome">▣</span><span>ChromeOS control</span><small>permissioned</small></button>
+      <div class="rail-bottom"><div class="presence-dot"></div><div><b>Safe mode is on</b><small>Risky actions ask first</small></div><button class="icon-button" id="settingsButton" aria-label="Settings">⚙</button></div>
+    </aside>
+
+    <main class="main-stage">
+      <header class="topbar"><div class="mobile-brand">orbit <span>/ community agent</span></div><div class="topbar-actions"><span class="live-pill"><i></i> LIVE <span id="liveStatus">fallback ready</span></span><button class="icon-button" id="helpButton">?</button><button class="avatar">AC</button></div></header>
+      <section class="conversation-stage" id="conversationStage">
+        <div class="stage-heading"><div><span class="eyebrow">COMMAND CENTER · GENERAL ROOM</span><h1>What can I help your community do?</h1><p>I can welcome members, answer recurring questions, keep spaces healthy, and prepare actions for your approval.</p></div><button class="new-chat" id="newChat">＋ New conversation</button></div>
+        <div class="welcome-grid" id="welcomeGrid">
+          <button class="intent-card" data-intent="onboard"><span class="intent-icon amber">✦</span><b>Welcome a new member</b><small>Set context, roles, and next steps</small><span class="arrow">↗</span></button>
+          <button class="intent-card" data-intent="moderate"><span class="intent-icon coral">◒</span><b>Review a moderation issue</b><small>Summarize signals before action</small><span class="arrow">↗</span></button>
+          <button class="intent-card" data-intent="github"><span class="intent-icon violet">⌘</span><b>Ship from GitHub</b><small>Inspect a repo or draft a change</small><span class="arrow">↗</span></button>
+          <button class="intent-card" data-intent="answer"><span class="intent-icon cyan">↯</span><b>Answer a repeat question</b><small>Use the community playbook</small><span class="arrow">↗</span></button>
+        </div>
+        <div class="chat-feed" id="chatFeed" aria-live="polite"></div>
+        <div class="composer-wrap"><div class="composer-tools"><button class="tool-chip" id="contextButton">＋ Add context</button><span class="context-note" id="contextNote">No context attached</span></div><form class="composer" id="composer"><textarea id="messageInput" rows="1" placeholder="Ask Orbit anything about your community…"></textarea><button class="send-button" aria-label="Send message">↑</button></form><div class="composer-foot"><span>Orbit can be wrong. Review important decisions.</span><span><kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span></div></div>
+      </section>
+    </main>
+
+    <aside class="inspector" id="inspector"><div class="inspector-head"><div><span class="eyebrow">LIVE CONTEXT</span><h2>Room pulse</h2></div><span class="mini-live"><i></i> synced</span></div><div class="pulse-card"><div class="pulse-top"><span class="pulse-label">COMMUNITY HEALTH</span><strong>92<span>/100</span></strong></div><div class="meter"><i style="width:92%"></i></div><div class="pulse-caption"><span>↑ 4.8% this week</span><span>low friction</span></div></div><div class="inspector-section"><div class="section-title">Pending attention <span>4</span></div><div class="attention-item"><span class="attention-dot amber"></span><div><b>New member queue</b><small>12 people need a welcome</small></div><button class="row-arrow">↗</button></div><div class="attention-item"><span class="attention-dot coral"></span><div><b>Possible spam cluster</b><small>3 messages · #introductions</small></div><button class="row-arrow">↗</button></div><div class="attention-item"><span class="attention-dot violet"></span><div><b>Human handoff</b><small>@kai asked for a moderator</small></div><button class="row-arrow">↗</button></div></div><div class="inspector-section"><div class="section-title">Agent policy</div><div class="policy-row"><span>Read & summarize</span><b class="toggle on"></b></div><div class="policy-row"><span>Draft replies</span><b class="toggle on"></b></div><div class="policy-row"><span>Moderate automatically</span><b class="toggle"></b></div><div class="policy-row"><span>Control computer</span><b class="toggle"></b></div><p class="policy-note">Risky actions stay gated until a human approves them.</p></div><div class="inspector-section activity"><div class="section-title">Recent activity <span class="linkish" id="viewActivity">view all</span></div><div class="activity-line"><span class="activity-time">14:32</span><span>Drafted welcome for <b>@mika</b></span></div><div class="activity-line"><span class="activity-time">14:18</span><span>Flagged a likely <b>duplicate</b></span></div><div class="activity-line"><span class="activity-time">13:56</span><span>Escalated thread to <b>human</b></span></div></div></aside>
+  </div>
+  <div class="toast" id="toast"></div>
+  <dialog id="approvalDialog"><div class="dialog-icon">!</div><span class="eyebrow">HUMAN APPROVAL REQUIRED</span><h2 id="approvalTitle">Ready to take a risky action?</h2><p id="approvalBody">Orbit prepared this action, but it may change access or delete content. Review the exact scope before continuing.</p><div class="approval-scope" id="approvalScope"></div><div class="dialog-actions"><button class="secondary-button" id="cancelApproval">Not now</button><button class="primary-button" id="confirmApproval">Approve action</button></div></dialog>
+  <script src="app.js"></script>
+</body>
+</html>
