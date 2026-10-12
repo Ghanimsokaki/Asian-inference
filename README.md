@@ -2,6 +2,16 @@
 
 AI dataset generator, model fine-tuner and community hub — your own private AI hub.
 
+## Foundry Mobile game prototype
+
+This repository also includes a self-contained browser management game in [`game/`](game/): start a phone company in a 2007 garage, hire staff, research CPU/GPU parts, build an office and factory, and launch phones against competing brands. Run it with:
+
+```bash
+python -m http.server 8080 --directory game
+```
+
+See [`game/README.md`](game/README.md) for the gameplay loop and local run instructions.
+
 Chat with an assistant that answers questions about machine learning and generates
 synthetic datasets on request, then turns any of them into a ready-to-run Google
 Colab fine-tuning notebook.
