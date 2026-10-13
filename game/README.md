@@ -20,4 +20,5 @@ Then open `http://localhost:8080`.
 - **Build campus** progresses from garage → office/lab/QA → factory; the dashboard renders the campus as an interactive 3D-style perspective world while all menus remain 2D.
 - **Phone studio** lets you rename the phone and configure CPU, GPU, and finish/camera.
 - **Launch prototype** spends cash to earn reputation and initial market share.
+- **Operate the company** after launch: each day sells units based on phone appeal, reputation, QA, and factory capacity; sales revenue funds the next research and build decisions. The dashboard shows live units sold, revenue, and runway pressure.
 - Progress is saved automatically in browser `localStorage`.
